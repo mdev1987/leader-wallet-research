@@ -1,30 +1,31 @@
 /**
- * Helius archival client for event-local transaction analysis.
+ * Helius archival client.
  *
- * We intentionally request full transactions only after Birdeye identifies a
- * pump/dump window. The narrow time range keeps research storage and RPC usage
- * far smaller than downloading the token's complete transaction history.
+ * Full transactions are fetched only after a price event has been detected.
+ * This keeps the expensive transaction payloads local to short event windows.
  */
 
-import { api } from "../config";
+import { config } from "../config";
 import type { RawTransaction } from "../types";
 
 const BASE_URL = "https://mainnet.helius-rpc.com";
 
+function requireApiKey(): string {
+  if (!config.api.heliusKey) throw new Error("Missing HELIUS_API_KEY");
+  return config.api.heliusKey;
+}
+
 async function rpc<T>(method: string, params: unknown[]): Promise<T> {
-  const response = await fetch(
-    `${BASE_URL}/?api-key=${api.heliusKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method,
-        params,
-      }),
-    },
-  );
+  const response = await fetch(`${BASE_URL}/?api-key=${requireApiKey()}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method,
+      params,
+    }),
+  });
 
   if (!response.ok) {
     throw new Error(`Helius HTTP ${response.status}: ${response.statusText}`);
@@ -46,7 +47,7 @@ async function rpc<T>(method: string, params: unknown[]): Promise<T> {
   return json.result;
 }
 
-/** Fetch all full transactions in a token/event time window. */
+/** Fetch all full transactions in one narrow token/event time window. */
 export async function fetchTransactionsForAddress(
   address: string,
   startTime: number,
@@ -57,14 +58,19 @@ export async function fetchTransactionsForAddress(
   let paginationToken: string | undefined;
 
   do {
+    const remaining = opts?.maxTransactions !== undefined
+      ? Math.max(1, opts.maxTransactions - transactions.length)
+      : 100;
+
     const options: Record<string, unknown> = {
       transactionDetails: "full",
       sortOrder: "asc",
-      limit: 100,
+      limit: Math.min(100, remaining),
+      maxSupportedTransactionVersion: 1,
       filters: {
         blockTime: {
-          gte: startTime,
-          lte: endTime,
+          gte: Math.floor(startTime),
+          lte: Math.floor(endTime),
         },
         status: "succeeded",
         tokenAccounts: "balanceChanged",
@@ -74,9 +80,10 @@ export async function fetchTransactionsForAddress(
     if (paginationToken) options.paginationToken = paginationToken;
 
     const result = await rpc<{
-      data: RawTransaction[];
+      data?: RawTransaction[];
       paginationToken?: string;
     }>("getTransactionsForAddress", [address, options]);
+
     transactions.push(...(result.data ?? []));
 
     if (

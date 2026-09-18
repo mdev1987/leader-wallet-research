@@ -1,89 +1,97 @@
-/**
- * Central configuration for the pump-window wallet research scanner.
- *
- * Keep strategy-like thresholds here so they can later be optimized without
- * changing the collection and parsing code.
- */
+/** Central configuration for discovery, event detection, analysis and storage. */
 
 export const config = {
   discovery: {
-    // Spaced out so a later run does not hammer Birdeye CU limits.
     everyMs: 5 * 60_000,
-    maxActiveTokens: 5,
+    maxTokens: 10,
     candidateTtlMs: 15 * 60_000,
     minLiquidityUsd: 25_000,
     minVolume1hUsd: 50_000,
     minTrade1hCount: 300,
+    limit: 50,
+    sortBy: "volume_1h_change_percent",
+    sortType: "desc",
   },
 
   birdeye: {
-    // Starter plans throttle well below 1 RPS on heavy endpoints
-    // (token-list, 1s OHLCV), so default to 1 req / 2s + retries.
     minIntervalMs: 2_000,
-    scanEveryMs: 30_000,
-    candleLookbackSec: 3 * 60,
+    scanEveryMs: 20_000,
     maxRetries: 4,
-    baseRetryDelayMs: 2_000,
-    maxRetryDelayMs: 30_000,
-    // After an explicit 429 / CU-limit, skip Birdeye calls for this long.
+    baseRetryMs: 2_000,
+    maxRetryMs: 30_000,
     rateLimitCooldownMs: 90_000,
-    // Spent compute-unit quota: retries cannot help, so back off long and
-    // let the DexScreener fallback carry detection until the budget refills.
     quotaCooldownMs: 30 * 60_000,
-  },
-
-  dex: {
-    // Keyless fallback price path while Birdeye is cooling down. One batch
-    // spot request per scan cycle — trivial load against the free tier.
-    enabled: true,
-    minIntervalMs: 2_000,
-    // Spot samples are bucketed into candles of this width. Coarser than
-    // Birdeye 1s candles: same detector thresholds, lower resolution.
-    candleBucketSec: 30,
-    // Per-token ring buffer cap (~4h at one sample per 30s cycle).
-    maxSamplesPerToken: 480,
+    candleLookbackSec: 5 * 60,
+    candleFetchPaddingSec: 10,
   },
 
   event: {
     moveSec: 60,
-    movePct: 12,
     accelerationSec: 15,
-    accelerationPct: 3,
-    cooldownSec: 20 * 60,
+    minMovePct: 12,
+    minAccelerationPct: 3,
+    crashPct: 60,
+    // Live Birdeye candles should be truly 1-second data. A larger replay
+    // bridge is configured separately below because compact trade exports are sparse.
+    maxCandleGapSec: 2,
+    // Reject implausible one-second price jumps before classifying an event.
+    // This protects research labels from balance-delta price artifacts.
+    maxOneSecondMovePct: 50,
+    // Inspect a short pre-event window before the proposed start so an
+    // isolated bad sample cannot become the event's starting price.
+    discontinuityLookbackSec: 15,
+    breakoutFraction: 0.75,
+    cooldownSec: 5 * 60,
+    searchBackSec: 75,
+    volumeBaselineSec: 120,
+    volumeRecentSec: 15,
+  },
+
+  replay: {
+    // Compact Helius trade exports are sparse. Carry the last trade price
+    // forward for gaps up to this many seconds when reconstructing replay candles.
+    maxCandleGapSec: 15,
   },
 
   analysis: {
+    // Pre-event window used for leadership evidence.
     preSec: 180,
+    // Post-confirmation tail. The full acceleration/breakout interval is always
+    // included automatically by buildObservation before this tail.
     postSec: 30,
     forwardOffsetsSec: [5, 15, 30, 60],
+    maxCandleGapSec: 3,
+  },
+
+  walletLabels: {
+    // Add only explicitly verified program IDs. Pair addresses are populated
+    // automatically per event from DexScreener token-pairs.
+    knownPrograms: {} as Record<string, "router" | "program">,
   },
 
   report: {
-    minLeaderEvents: 3,
-    minLeaderTokens: 2,
-    // A wallet's event counts only when its dominant side there reaches
-    // this fraction. Pool/MM legs (~50/50 by construction) never qualify.
-    minDirectionConsistency: 0.8,
+    minWalletEvents: 3,
+    minWalletTokens: 2,
+    minValidationEvents: 2,
+    topWallets: 100,
   },
 
   eval: {
-    // Time-ordered train/valid split for src/eval.ts: earliest 70% of
-    // events train candidate selection, latest 30% validate it.
     trainFrac: 0.7,
   },
 
-  output: {
+  storage: {
     dir: "./data",
     events: "events.jsonl",
     observations: "wallet_observations.jsonl",
+    walletEvents: "wallet_events.jsonl",
     leaders: "leader_wallets.json",
+    evaluation: "eval_report.json",
+    candidates: "candidates.json",
+  },
+
+  api: {
+    birdeyeKey: process.env.BIRDEYE_API_KEY,
+    heliusKey: process.env.HELIUS_API_KEY,
   },
 } as const;
-
-export const api = {
-  birdeyeKey: Bun.env.BIRDEYE_API_KEY,
-  heliusKey: Bun.env.HELIUS_API_KEY,
-};
-
-if (!api.birdeyeKey) throw new Error("Missing BIRDEYE_API_KEY");
-if (!api.heliusKey) throw new Error("Missing HELIUS_API_KEY");

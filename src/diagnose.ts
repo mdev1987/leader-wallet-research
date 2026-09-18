@@ -1,58 +1,54 @@
 /**
- * Parse-coverage diagnostic: fetch a bounded sample of raw Helius
- * transactions for a token window and histogram why each transaction (or
- * token leg) did or did not produce a trade.
+ * Helius parser coverage diagnostic for a narrow token/event window.
  *
  * Usage:
- *   bun run src/diagnose.ts --token <mint> --start <unix> --end <unix>
- *     [--limit 200]
- *
- * Read-only against the Helius API; writes nothing.
+ *   bun run src/diagnose.ts --token <mint> --start <unix> --end <unix> [--limit 200]
  */
 
 import { fetchTransactionsForAddress } from "./api/helius";
-import { parseTrades, type ParseSkipReason } from "./analysis";
+import { parseTrades, type ParseSkipReason } from "./research/trades";
 
 function argValue(args: string[], name: string, fallback: string): string {
   const index = args.indexOf(name);
-  if (index < 0) return fallback;
-  return args[index + 1] ?? fallback;
+  return index >= 0 ? args[index + 1] ?? fallback : fallback;
 }
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const token = argValue(args, "--token", "");
-  const start = Number(argValue(args, "--start", ""));
-  const end = Number(argValue(args, "--end", ""));
+  const start = Number(argValue(args, "--start", "NaN"));
+  const end = Number(argValue(args, "--end", "NaN"));
   const limit = Number(argValue(args, "--limit", "200"));
 
-  if (!token) throw new Error("missing required --token <mint>");
+  if (!token) throw new Error("missing --token <mint>");
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
-    throw new Error("missing or invalid --start/--end unix timestamps");
+    throw new Error("invalid --start/--end");
   }
 
-  const transactions = await fetchTransactionsForAddress(token, start, end, {
-    maxTransactions: Number.isFinite(limit) && limit > 0 ? limit : 200,
+  const maxTransactions = Number.isFinite(limit) && limit > 0
+    ? Math.floor(limit)
+    : 200;
+
+  const txs = await fetchTransactionsForAddress(token, start, end, {
+    maxTransactions,
   });
-  console.log(`fetched ${transactions.length} raw transactions`);
 
   const skips = new Map<ParseSkipReason, number>();
   const skipExamples = new Map<ParseSkipReason, string>();
   let trades = 0;
-
-  for (const tx of transactions) {
-    const parsed = parseTrades(tx, token, (reason) => {
+  for (const tx of txs.slice(0, Math.max(1, Math.floor(limit)))) {
+    trades += parseTrades(tx, token, (reason) => {
       skips.set(reason, (skips.get(reason) ?? 0) + 1);
       if (!skipExamples.has(reason)) {
         const sig = tx.transaction.signatures?.[0];
         if (sig) skipExamples.set(reason, sig);
       }
-    });
-    trades += parsed.length;
+    }).length;
   }
 
-  const totalSkips = [...skips.values()].reduce((sum, n) => sum + n, 0);
-  console.log(`trades=${trades} skip-events=${totalSkips}`);
+  const totalSkips = [...skips.values()].reduce((sum, count) => sum + count, 0);
+  console.log(`rawTransactions=${txs.length} limit=${maxTransactions}`);
+  console.log(`parsedTrades=${trades} skipEvents=${totalSkips}`);
   for (const [reason, count] of [...skips.entries()].sort((a, b) => b[1] - a[1])) {
     const pct = totalSkips > 0 ? ((count / totalSkips) * 100).toFixed(1) : "0.0";
     console.log(

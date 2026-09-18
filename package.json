@@ -1,12 +1,17 @@
 {
-  "name": "leader_wallet_research",
-  "module": "index.ts",
-  "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
-    "typescript": "^7"
-  },
+  "name": "leader-wallet-research",
+  "version": "4.2.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "replay": "bun run src/replay.ts",
+    "eval": "bun run src/eval.ts",
+    "diagnose": "bun run src/diagnose.ts",
+    "typecheck": "tsc --noEmit",
+    "selftest": "bun run src/selftest.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
 }

@@ -1,39 +1,22 @@
 /**
- * Birdeye REST client.
+ * Birdeye client used for two research jobs:
+ * 1. Discover a small candidate universe of actively moving Solana tokens.
+ * 2. Fetch 1-second USD OHLCV for local pump/dump event detection.
  *
- * Discovery uses the V3 token-list endpoint. Price-event detection uses the
- * V3 1-second OHLCV endpoint so the event detector can focus on short moves.
+ * Birdeye is deliberately the only price/event source in the live worker.
+ * DexScreener is not used for event timing because its keyless spot endpoint is
+ * much coarser than the 1s OHLCV needed for this research.
  */
 
-import { api, config } from "../config";
+import { config } from "../config";
 import type { Candle, TokenCandidate } from "../types";
 import { sleep, toNumber } from "../utils";
 
 const BASE_URL = "https://public-api.birdeye.so";
 
-class RateLimiter {
-  private nextAllowedAt = 0;
-
-  constructor(private readonly minIntervalMs: number) {}
-
-  async wait(): Promise<void> {
-    const delay = Math.max(0, this.nextAllowedAt - Date.now());
-    if (delay > 0) await sleep(delay);
-    this.nextAllowedAt = Date.now() + this.minIntervalMs;
-  }
-}
-
-const limiter = new RateLimiter(config.birdeye.minIntervalMs);
-
-/** Thrown when Birdeye signals rate / compute-unit limits. Retriable. */
-export class BirdeyeRateLimitError extends Error {
+export class BirdeyeError extends Error {
   readonly status: number;
   readonly retryAfterMs: number;
-  /**
-   * True when the compute-unit quota itself is spent (as opposed to a
-   * transient per-second throttle). Retrying is useless — the caller must
-   * cool down long instead of burning the refilling quota.
-   */
   readonly quotaExhausted: boolean;
 
   constructor(
@@ -43,53 +26,58 @@ export class BirdeyeRateLimitError extends Error {
     quotaExhausted = false,
   ) {
     super(message);
-    this.name = "BirdeyeRateLimitError";
+    this.name = "BirdeyeError";
     this.status = status;
     this.retryAfterMs = retryAfterMs;
     this.quotaExhausted = quotaExhausted;
   }
 }
 
-export function isRateLimitError(error: unknown): error is BirdeyeRateLimitError {
-  return error instanceof BirdeyeRateLimitError;
+export function isBirdeyeRateLimit(error: unknown): error is BirdeyeError {
+  return error instanceof BirdeyeError;
 }
 
-function parseRetryAfterMs(response: Response, attempt: number): number {
-  const header = response.headers.get("retry-after");
-  const headerSec = header ? Number(header) : NaN;
-  if (Number.isFinite(headerSec) && headerSec >= 0) {
-    return Math.min(headerSec * 1000, config.birdeye.maxRetryDelayMs);
+class RateLimiter {
+  private nextAllowedAt = 0;
+
+  constructor(private readonly intervalMs: number) {}
+
+  async wait(): Promise<void> {
+    const delay = Math.max(0, this.nextAllowedAt - Date.now());
+    if (delay > 0) await sleep(delay);
+    this.nextAllowedAt = Date.now() + this.intervalMs;
   }
-  // Exponential backoff with jitter: 2s, 4s, 8s, ... capped.
-  const backoff =
-    config.birdeye.baseRetryDelayMs * 2 ** Math.min(attempt, 4);
+}
+
+const limiter = new RateLimiter(config.birdeye.minIntervalMs);
+
+function retryDelay(response: Response, attempt: number): number {
+  const header = response.headers.get("retry-after");
+  const seconds = header ? Number(header) : NaN;
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, config.birdeye.maxRetryMs);
+  }
+
   return Math.min(
-    backoff + Math.floor(Math.random() * 500),
-    config.birdeye.maxRetryDelayMs,
+    config.birdeye.baseRetryMs * 2 ** Math.min(attempt, 4),
+    config.birdeye.maxRetryMs,
   );
 }
 
-/** True for 429 plus Birdeye's 400 CU-limit responses. */
-function isRetriableResponse(status: number, bodyText: string): boolean {
-  if (status === 429) return true;
-  return (
-    status === 400 &&
-    /compute units|too many requests|rate limit/i.test(bodyText)
-  );
+function isQuotaMessage(text: string): boolean {
+  return /compute units|quota/i.test(text);
 }
 
-/** True when the quota itself is spent — retries cannot help. */
-function isQuotaExhausted(bodyText: string): boolean {
-  return /compute units/i.test(bodyText);
+function requireApiKey(): string {
+  if (!config.api.birdeyeKey) throw new Error("Missing BIRDEYE_API_KEY");
+  return config.api.birdeyeKey;
 }
 
 async function requestJson<T>(
   path: string,
   params: Record<string, string>,
 ): Promise<T> {
-  let lastError: unknown = null;
-
-  for (let attempt = 0; attempt <= config.birdeye.maxRetries; attempt++) {
+  for (let attempt = 0; attempt <= config.birdeye.maxRetries; attempt += 1) {
     await limiter.wait();
 
     const url = new URL(`${BASE_URL}${path}`);
@@ -100,7 +88,7 @@ async function requestJson<T>(
     const response = await fetch(url, {
       headers: {
         accept: "application/json",
-        "X-API-KEY": api.birdeyeKey!,
+        "X-API-KEY": requireApiKey(),
         "x-chain": "solana",
       },
     });
@@ -112,26 +100,26 @@ async function requestJson<T>(
       };
 
       if (json.success === false) {
-        const message = json.message ?? "unknown error";
-        if (/compute units|too many requests|rate limit/i.test(message)) {
-          // Spent quota fails fast: burning retries against an empty budget
-          // consumes the refill as fast as it arrives and never recovers.
-          // Transient throttles keep the exponential-backoff retry loop.
-          if (isQuotaExhausted(message)) {
-            throw new BirdeyeRateLimitError(
-              400,
-              `Birdeye error: ${message}`,
+        const message = json.message ?? "Birdeye request failed";
+        if (/rate limit|too many requests|compute units/i.test(message)) {
+          if (isQuotaMessage(message)) {
+            throw new BirdeyeError(
+              response.status,
+              message,
               config.birdeye.quotaCooldownMs,
               true,
             );
           }
+
           const delay = Math.min(
-            config.birdeye.baseRetryDelayMs * 2 ** Math.min(attempt, 4),
-            config.birdeye.maxRetryDelayMs,
+            config.birdeye.baseRetryMs * 2 ** Math.min(attempt, 4),
+            config.birdeye.maxRetryMs,
           );
-          lastError = new BirdeyeRateLimitError(400, `Birdeye error: ${message}`, delay);
-          await sleep(delay);
-          continue;
+          if (attempt < config.birdeye.maxRetries) {
+            await sleep(delay);
+            continue;
+          }
+          throw new BirdeyeError(response.status, message, delay);
         }
         throw new Error(`Birdeye error: ${message}`);
       }
@@ -139,67 +127,41 @@ async function requestJson<T>(
       return json;
     }
 
-    const bodyText = await response.text().catch(() => "");
+    const body = await response.text().catch(() => "");
+    const limited = response.status === 429 || /rate limit|too many requests/i.test(body);
 
-    if (isQuotaExhausted(bodyText)) {
-      throw new BirdeyeRateLimitError(
-        response.status,
-        `Birdeye HTTP ${response.status}: ${bodyText.slice(0, 300) || response.statusText}`,
-        config.birdeye.quotaCooldownMs,
-        true,
-      );
-    }
-
-    if (
-      isRetriableResponse(response.status, bodyText) &&
-      attempt < config.birdeye.maxRetries
-    ) {
-      const delay = parseRetryAfterMs(response, attempt);
-      lastError = new BirdeyeRateLimitError(
-        response.status,
-        `Birdeye HTTP ${response.status}: ${bodyText.slice(0, 300) || response.statusText}`,
-        delay,
-      );
-      console.warn(
-        `[ratelimit] Birdeye ${response.status} on ${path} ` +
-          `(attempt ${attempt + 1}/${config.birdeye.maxRetries + 1}), ` +
-          `retrying in ${(delay / 1000).toFixed(1)}s`,
-      );
+    if (limited && attempt < config.birdeye.maxRetries) {
+      const delay = retryDelay(response, attempt);
       await sleep(delay);
       continue;
     }
 
-    if (isRetriableResponse(response.status, bodyText)) {
-      throw new BirdeyeRateLimitError(
-        response.status,
-        `Birdeye HTTP ${response.status}: ${bodyText.slice(0, 300) || response.statusText}`,
-        parseRetryAfterMs(response, attempt),
-      );
-    }
-
-    throw new Error(
-      `Birdeye HTTP ${response.status}: ${bodyText.slice(0, 300) || response.statusText}`,
+    throw new BirdeyeError(
+      response.status,
+      `Birdeye HTTP ${response.status}: ${body.slice(0, 300) || response.statusText}`,
+      retryDelay(response, attempt),
+      isQuotaMessage(body),
     );
   }
 
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("Birdeye request failed after retries");
+  throw new Error("Birdeye request exhausted retries");
 }
 
-/** Discover a small, high-activity Solana token universe. */
+/** Discover a compact Solana token universe using activity/momentum filters. */
 export async function discoverTokens(): Promise<TokenCandidate[]> {
   const response = await requestJson<{
     data?: {
       items?: Array<Record<string, unknown>>;
+      has_next?: boolean;
+      next_scroll_id?: string;
     };
-  }>("/defi/v3/token/list", {
-    sort_by: "volume_1h_change_percent",
-    sort_type: "desc",
+  }>("/defi/v3/token/list/scroll", {
+    sort_by: config.discovery.sortBy,
+    sort_type: config.discovery.sortType,
     min_liquidity: String(config.discovery.minLiquidityUsd),
     min_volume_1h_usd: String(config.discovery.minVolume1hUsd),
     min_trade_1h_count: String(config.discovery.minTrade1hCount),
-    limit: "100",
+    limit: String(config.discovery.limit),
   });
 
   return (response.data?.items ?? [])
@@ -210,12 +172,18 @@ export async function discoverTokens(): Promise<TokenCandidate[]> {
       liquidityUsd: toNumber(item.liquidity),
       volume1hUsd: toNumber(item.volume_1h_usd),
       trade1hCount: toNumber(item.trade_1h_count),
+      recentListingTime: toNumber(item.recent_listing_time, NaN),
     }))
-    .filter((token) => token.address.length > 20)
-    .slice(0, config.discovery.maxActiveTokens);
+    .filter(
+      (token) =>
+        token.address.length > 20 &&
+        token.liquidityUsd >= config.discovery.minLiquidityUsd &&
+        token.volume1hUsd >= config.discovery.minVolume1hUsd,
+    )
+    .slice(0, config.discovery.maxTokens);
 }
 
-/** Fetch 1-second OHLCV candles for one token. */
+/** Fetch 1-second USD OHLCV for a token and return chronologically sorted candles. */
 export async function fetchCandles(
   address: string,
   timeFrom: number,
@@ -237,8 +205,8 @@ export async function fetchCandles(
     address,
     type: "1s",
     currency: "usd",
-    time_from: String(timeFrom),
-    time_to: String(timeTo),
+    time_from: String(Math.floor(timeFrom)),
+    time_to: String(Math.floor(timeTo)),
     mode: "range",
     padding: "false",
   });

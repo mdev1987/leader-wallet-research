@@ -1,211 +1,193 @@
-# Solana Pump-Window Leader Wallet Research
+# Leader Wallet Research v4.1
 
-This is a Bun/TypeScript research worker for discovering wallets that repeatedly trade **immediately before short pump/dump events**.
+Bun + TypeScript research pipeline for discovering wallets that repeatedly trade **around short-lived pump/dump events**.
 
-It intentionally does **not** download full token histories. The pipeline is:
+v4.1 is additive to v4/v3: event timing and the single Birdeye price source are unchanged. The new layer adds deterministic pool-address labels from one keyless DexScreener `token-pairs` request per event token, plus phase-aware wallet-event features.
+
+## Research design
 
 ```text
 Birdeye token discovery
-        ↓
-Birdeye 1s OHLCV
-        ↓
-local pump/dump detector
-        ↓
-Helius getTransactionsForAddress
-        ↓
-event-local wallet/trade extraction
-        ↓
-forward price response
-        ↓
-leader_wallets.json
+        |
+        v
+Birdeye 1s OHLCV  <--- only price/event timing source
+        |
+        v
+accelerationStart / breakoutStart
+        |
+        v
+Helius event-local transactions
+        |
+        v
+trade parser
+        |
+        +---- DexScreener token-pairs metadata
+        |          |
+        |          +--> deterministic pair-address -> pool label
+        |
+        v
+wallet-event observations
+        |
+        v
+phase-aware wallet stats
+        |
+        v
+chronological validation
 ```
+
+## v4 additions
+
+### 1. Deterministic pool labels
+
+When a pump/dump event is accepted, the worker makes one keyless request to:
+
+```text
+GET /token-pairs/v1/solana/<tokenAddress>
+```
+
+The returned `pairAddress` values and minimal pair metadata (`dexId`, liquidity, base/quote addresses) are stored on the event and used to classify any matching trade owner as:
+
+```text
+pool / pair-address
+```
+
+This is metadata labeling only. DexScreener does **not** provide event timing or forward-return labels in this project.
+
+The full five-way label is:
+
+```text
+pool
+router
+program
+trader
+unknown
+```
+
+with a companion `walletTypeReason`:
+
+```text
+pair-address
+known-program
+behavioral
+default
+```
+
+Known router/program IDs are intentionally an explicit configuration in `src/config.ts`; do not add IDs without verifying what the address represents.
+
+A wallet is never automatically classified as a market maker merely because it has mixed buy/sell behavior. The event record keeps `sideConsistency` and `behavioralHint` as soft evidence. At report/evaluation time, deterministic infrastructure labels (`pool`, `router`, `program`) are excluded from leader promotion and candidate validation, while the underlying rows remain stored.
+
+### 2. Phase-aware volume
+
+Each wallet-event now contains SOL volumes split by:
+
+```text
+pre_event:   buy / sell
+acceleration: buy / sell
+breakout:     buy / sell
+```
+
+and matching trade counts. This directly represents patterns such as:
+
+```text
+accumulate -> accelerate -> breakout -> distribute
+```
+
+### 3. Candle-based entry/exit prices
+
+`avgEntryPriceUsd` and `avgExitPriceUsd` are calculated from the **market candle close at trade time**, weighted by token amount. They never use `tradePriceSol`, because the Helius balance-delta price is explicitly labeled as noisy.
+
+For compact trade-price replay, these USD fields remain `null`. That keeps the replay honest rather than mixing SOL/token and USD units.
 
 ## Setup
 
 ```bash
 cp .env.example .env
-# fill in BIRDEYE_API_KEY and HELIUS_API_KEY
+```
+
+Set:
+
+```dotenv
+BIRDEYE_API_KEY=...
+HELIUS_API_KEY=...
+```
+
+Then:
+
+```bash
 bun install
-bun run src/main.ts
+bun run typecheck
+bun run selftest
 ```
 
-## Configuration
-
-| Variable | Required | Used by |
-|---|---|---|
-| `BIRDEYE_API_KEY` | yes | token discovery + 1s OHLCV (`src/api/birdeye.ts`) |
-| `HELIUS_API_KEY` | yes | event-window transactions (`src/api/helius.ts`) |
-
-`.env` is gitignored and must never be committed. `.env.example`
-documents the full schema (including placeholders for optional/planned
-integrations such as paper trading, Telegram alerts, and enrichment
-services); only the two keys above are read by the current worker.
-
-## Timed run
-
-Birdeye's free/Starter plans enforce tight compute-unit limits, so the
-bot is configured to back off instead of crash-looping:
-
-- `src/api/birdeye.ts` retries 429s with exponential backoff
-  (respects `Retry-After`) and throws `BirdeyeRateLimitError` when spent.
-- `src/main.ts` isolates failures per token, skips Birdeye calls during a
-  90s cooldown, keeps pending events for retry, and exits cleanly on
-  SIGINT/SIGTERM.
-- `src/config.ts` defaults are softened for Starter plans:
-  discovery every 5 min, max 5 tokens, 1 req / 2s, scan every 30s,
-  3-min candle lookback.
-
-Run it timed later with:
+Run the live collector:
 
 ```bash
-timeout 900 bun run src/main.ts 2>&1 | tee live_run.log
+bun run start
 ```
 
-Expected while limited: `[ratelimit] Birdeye 429 ... retrying in ...` and
-`[ratelimit] ... backing off ...` lines, then normal
-`[discovery] / [event] / [analysis]` lines once quota recovers.
-Two backoff tiers: transient throttles retry with backoff and cool down 90s;
-a spent compute-unit quota fails fast (no retry burn) and cools down 30 min.
-Progress is append-only and resumable: re-running picks up
-`data/events.jsonl` + `data/wallet_observations.jsonl` and rewrites
-`data/leader_wallets.json`. If 429s persist, raise
-`birdeye.minIntervalMs` / `scanEveryMs` or lower `maxActiveTokens` in
-`src/config.ts`.
-
-## DexScreener fallback (secondary price path)
-
-While Birdeye cools down, the worker keeps detecting events and labeling
-forward returns from DexScreener spot samples (keyless batch quotes, one
-request per scan cycle) instead of stalling. Helius analysis is unaffected
-throughout. Fallback rows carry `forwardBasis: "dex"` (USD closes, same
-denomination as Birdeye `"candle"` rows). Resolution is coarser (~30s
-samples vs 1s candles) and the sample buffer needs ~45 min from boot before
-fallback detection can fire — it is a continuity bridge for long outages,
-not a replacement for Birdeye discovery.
-
-Output files (`data/` is gitignored):
-
-```text
-data/events.jsonl                 # one line per detected pump/dump
-data/wallet_observations.jsonl    # one line per trade × event
-data/wallet_observations.pre-fix.jsonl  # backup of rows written before the forward-return fix
-data/leader_wallets.json          # promoted wallets + methodology block
-```
-
-## Project structure
-
-```text
-src/
-  main.ts        # long-running worker: discover → detect → analyze → report
-  config.ts      # all thresholds in one place (tune without touching logic)
-  analysis.ts    # pure logic: event detection, trade parsing, wallet scoring
-  replay.ts      # offline backtest over historical compact trades (no APIs)
-  eval.ts        # train/valid evaluation: do past leaders lead future pumps?
-  diagnose.ts    # parse-coverage histogram for any token window (read-only)
-  api/
-    birdeye.ts   # token discovery + 1s OHLCV (retry + rate-limit backoff)
-    dexscreener.ts  # keyless spot sampler: fallback candles when Birdeye is down
-    helius.ts    # event-window getTransactionsForAddress client
-  storage.ts     # append-only JSONL + leader report
-  types.ts / utils.ts
-get_tx_for_address.ts  # legacy one-shot Helius fetch for a single token window
-```
-
-## What counts as a leader?
-
-For a pump event, a **BUY before the event start** is aligned with the event.
-For a dump event, a **SELL before the event start** is aligned with the event.
-
-Additionally, a wallet's event only counts when its trades there are
-directionally consistent (dominant side >= 80%). Pool and market-maker legs
-take both sides of every swap by construction, so they can never qualify —
-while genuine accumulators and distributors pass. The report requires at
-least:
-
-- 3 consistent event observations
-- 2 unique tokens
-
-Leaders are ranked by **size-adjusted 60s return**: the directional forward
-return down-weighted by the trade's own share of its side's event-window SOL
-volume (`directional * (1 - share)`). A wallet that *was* most of the volume
-mechanically moved the pool; a small trade followed by a favorable move is
-stronger evidence of leadership. Raw directional return is kept alongside as
-a fallback for rows written before volume-share existed.
-
-This is deliberately a minimum sample filter, not a trading recommendation or a claim that the wallet causes price movement.
-
-## Forward returns
-
-For each trade, 5/15/30/60s forward returns are computed
-**candle-close to candle-close** (Birdeye USD), anchored at the candle
-at/before trade time. The 60s value becomes `directionalReturn60s`,
-sign-flipped for dump-sells so that a falling price after a pre-dump
-sell scores positive. Rows carry `forwardBasis: "candle"`; the
-accumulator ignores rows written before this convention existed
-(their forwards mixed SOL trade prices with USD closes).
-See `SUMMARY.md` (local-only, gitignored) for the fix history and
-collected results.
-
-## Research status
-
-- 2 dump events collected, 864 trade observations.
-- Leader list still empty: promotion needs a 3rd event on a 2nd token.
-- Birdeye budget is healthy (24k+ CUs remaining at last check); earlier
-  429s were per-second rate limiting, handled with backoff + cooldown.
-
-## Main parameters
-
-Edit `src/config.ts` to change:
-
-```text
-movePct          12% over 60s
-accelerationPct   3% over 15s
-analysisPreSec   180s before event start
-analysisPostSec   30s after event end
-forward offsets  5/15/30/60s
-```
-
-Keep these parameters explicit during research so they can later be optimized on a separate training/validation split.
-
-## Parser
-
-`parseTrades` evaluates every owner with a target-token balance change (not
-just the fee payer) and combines the **native + WSOL** SOL leg, so
-Jupiter-style routes that settle in wrapped SOL are still attributed. It
-still skips balance changes that do not form a clear opposite-direction
-buy/sell pair — validate extracted trades against an explorer on a sample
-before using the dataset for model training.
-
-Note on coverage: `getTransactionsForAddress` returns every transaction that
-*references* the mint, including bot-spam transactions that invoke no token
-program and move nothing (observed: 31k txs → 1k trades on one hot-token
-event). The parser correctly ignores those, so a low trade/tx ratio on a hot
-token is expected, not a bug. `bun run src/diagnose.ts --token <mint>
---start <unix> --end <unix>` histograms skip reasons for any window.
-
-## Replay (offline backtest)
-
-Re-run the identical detector + observation logic over a historical
-compact-trade file, with no API calls:
+One scan cycle:
 
 ```bash
-bun run src/replay.ts --token <mint> --symbol X --trades ./trades.json --out data/replay
+bun run src/main.ts --once
 ```
 
-1s candles are synthesized from trade-price medians (`forwardBasis:
-"trade"`), and a candle-gap tolerance (`--gap 5`) keeps sparse-data forward
-labels honest. Outputs `<out>_events.jsonl`, `<out>_observations.jsonl`,
-`<out>_report.json` — always separate from live `data/` files.
-
-## Train/valid evaluation
+## Replay
 
 ```bash
-bun run src/eval.ts
+bun run src/replay.ts \
+  --token <MINT> \
+  --symbol VIBE \
+  --trades ./helius_bun_trades.csv \
+  --out ./data/vibe \
+  --max-gap-sec 15
 ```
 
-Orders all events (live + replay) by start time, selects candidates on the
-earliest 70% with the live promotion thresholds, and scores their hit rate
-on the newest 30%. Time-ordering avoids lookahead leakage. With only a few
-events collected, expect `candidates=0` — that is the honest answer until
-the worker accumulates more events. The base hit rate (~0.5 on noise) is the
-number to beat.
+Optional deterministic pool labels can be supplied without changing the replay price source:
+
+```bash
+bun run src/replay.ts \
+  --token <MINT> \
+  --trades ./helius_bun_trades.csv \
+  --pool-addresses <PAIR1>,<PAIR2>
+```
+
+The live worker obtains those pair addresses automatically from DexScreener when each event is accepted.
+
+## Outputs
+
+```text
+data/events.jsonl
+data/wallet_observations.jsonl
+data/wallet_events.jsonl
+data/leader_wallets.json
+data/eval_report.json
+```
+
+All new v4 fields are additive/nullable so v3 observation rows can still be loaded. Legacy rows without labels are treated as `unknown/default`; legacy rows without candle USD prices keep `avgEntryPriceUsd` / `avgExitPriceUsd` as null.
+
+## Infrastructure reporting
+
+Raw pool/router/program observations are retained in `wallet_observations.jsonl` and `wallet_events.jsonl`, but the leader report and train/validation candidate set exclude those infrastructure types. `trader` and `unknown` remain eligible. This prevents deterministic infrastructure addresses from being promoted as leaders without removing the underlying evidence.
+
+## Leader validation table (v4.2)
+
+Wallet-event rows additionally carry side-split first leads, per-side per-horizon directional medians, signed net volume, pre-breakout positioning, and discovery-time event liquidity. The leader report aggregates these into the measurable leader definition:
+
+```text
+wallet, tokens, events
+median_buy_lead_sec, median_sell_lead_sec
+buy_5s / buy_15s / buy_30s / buy_60s
+sell_5s / sell_15s / sell_30s / sell_60s
+median_trade_sol, median_event_liquidity_usd, median_trade_vs_liquidity
+train_events, validation_events
+```
+
+`median_trade_vs_liquidity` mixes SOL event volume with USD liquidity: relative comparisons only, never an absolute dollar claim. The out-of-sample evaluator reports the same side-split leads and horizon returns separately for train and validation splits, and `diagnose` histograms parse skip reasons per window.
+
+## Important limitations
+
+The Helius trade parser remains a balance-delta parser. `priceQuality` stays `balance-delta`. v4 does not claim exact instruction-level swap pricing.
+
+The pair-address label is deterministic with respect to the DexScreener response captured at event time, but a DEX pair address is not necessarily every vault/account involved in the settlement. It should therefore be treated as a deterministic **pair-address label**, not as proof that every pool vault has been discovered.
+
+The project still does not infer causality. It measures whether wallet behavior precedes a market move and whether the subsequent return is directionally favorable.
