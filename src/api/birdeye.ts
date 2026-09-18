@@ -118,6 +118,7 @@ async function requestJson<T>(
         "X-API-KEY": requireApiKey(),
         "x-chain": "solana",
       },
+      signal: AbortSignal.timeout(config.http.requestTimeoutMs),
     });
 
     if (response.ok) {

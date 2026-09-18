@@ -19,6 +19,7 @@ async function rpc<T>(method: string, params: unknown[]): Promise<T> {
   const response = await fetch(`${BASE_URL}/?api-key=${requireApiKey()}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(config.http.requestTimeoutMs),
     body: JSON.stringify({
       jsonrpc: "2.0",
       id: 1,

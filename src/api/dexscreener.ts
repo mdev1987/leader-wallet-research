@@ -7,6 +7,7 @@
  */
 
 import type { TokenPairMetadata } from "../types";
+import { config } from "../config";
 
 const BASE_URL = "https://api.dexscreener.com";
 const CHAIN = "solana";
@@ -21,7 +22,10 @@ export class DexscreenerMetadataError extends Error {
 /** Fetch all token pairs for one Solana mint with one keyless request. */
 export async function fetchTokenPairs(tokenAddress: string): Promise<TokenPairMetadata[]> {
   const url = `${BASE_URL}/token-pairs/v1/${CHAIN}/${tokenAddress}`;
-  const response = await fetch(url, { headers: { accept: "application/json" } });
+  const response = await fetch(url, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(config.http.requestTimeoutMs),
+  });
 
   if (!response.ok) {
     throw new DexscreenerMetadataError(

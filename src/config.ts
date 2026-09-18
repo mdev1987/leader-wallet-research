@@ -99,4 +99,11 @@ export const config = {
     birdeyeKey: process.env.BIRDEYE_API_KEY,
     heliusKey: process.env.HELIUS_API_KEY,
   },
+
+  http: {
+    // No fetch in this codebase may hang forever: a tarpitted response
+    // stalls the worker loop silently (no log, no restart). Timeouts turn
+    // stalls into visible, retriable errors.
+    requestTimeoutMs: 30_000,
+  },
 } as const;
