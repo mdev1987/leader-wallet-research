@@ -70,6 +70,7 @@ function percentile(sortedAscending: number[], pct: number): number | null {
 function permutationNull(
   scoredValid: WalletEventStats[],
   candidateWallets: ReadonlySet<string>,
+  trainCandidateCount: number,
   resamples: number,
   seed: number,
 ): PermutationNull {
@@ -89,7 +90,10 @@ function permutationNull(
 
   const pool = scoredValid.filter((entry) => entry.alignedTradeCount > 0);
   if (pool.length === 0) return skipped("no scored validation entries");
-  if (candidateWallets.size === 0) return skipped("no candidates selected on train");
+  if (trainCandidateCount === 0) return skipped("no candidates selected on train");
+  if (candidateWallets.size === 0) {
+    return skipped("candidates exist but none has 2+ validation events yet");
+  }
 
   const labels = pool.map((entry) => entry.wallet);
   const hits = pool.map((entry) => (entry.positive60 === true ? 1 : 0));
@@ -319,6 +323,7 @@ export function evaluateWallets(eventStats: WalletEventStats[]) {
   const nullResult = permutationNull(
     validAligned,
     validationQualifiedWallets,
+    candidateSet.size,
     config.eval.permutationCount,
     config.eval.randomSeed,
   );
