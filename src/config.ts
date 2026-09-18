@@ -48,6 +48,12 @@ export const config = {
     minLeaderTokens: 2,
   },
 
+  eval: {
+    // Time-ordered train/valid split for src/eval.ts: earliest 70% of
+    // events train candidate selection, latest 30% validate it.
+    trainFrac: 0.7,
+  },
+
   output: {
     dir: "./data",
     events: "events.jsonl",

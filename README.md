@@ -104,6 +104,13 @@ The report requires at least:
 - 3 event observations
 - 2 unique tokens
 
+Leaders are ranked by **size-adjusted 60s return**: the directional forward
+return down-weighted by the trade's own share of its side's event-window SOL
+volume (`directional * (1 - share)`). A wallet that *was* most of the volume
+mechanically moved the pool; a small trade followed by a favorable move is
+stronger evidence of leadership. Raw directional return is kept alongside as
+a fallback for rows written before volume-share existed.
+
 This is deliberately a minimum sample filter, not a trading recommendation or a claim that the wallet causes price movement.
 
 ## Forward returns
@@ -139,6 +146,38 @@ forward offsets  5/15/30/60s
 
 Keep these parameters explicit during research so they can later be optimized on a separate training/validation split.
 
-## Parser limitation
+## Parser
 
-The current parser infers buy/sell from target-token balance changes plus native SOL balance changes. It can miss routes whose settlement is entirely represented through WSOL or otherwise does not produce the expected native-SOL delta. Validate the extracted trades against an explorer on a sample before using the dataset for model training.
+`parseTrades` evaluates every owner with a target-token balance change (not
+just the fee payer) and combines the **native + WSOL** SOL leg, so
+Jupiter-style routes that settle in wrapped SOL are still attributed. It
+still skips balance changes that do not form a clear opposite-direction
+buy/sell pair — validate extracted trades against an explorer on a sample
+before using the dataset for model training.
+
+## Replay (offline backtest)
+
+Re-run the identical detector + observation logic over a historical
+compact-trade file, with no API calls:
+
+```bash
+bun run src/replay.ts --token <mint> --symbol X --trades ./trades.json --out data/replay
+```
+
+1s candles are synthesized from trade-price medians (`forwardBasis:
+"trade"`), and a candle-gap tolerance (`--gap 5`) keeps sparse-data forward
+labels honest. Outputs `<out>_events.jsonl`, `<out>_observations.jsonl`,
+`<out>_report.json` — always separate from live `data/` files.
+
+## Train/valid evaluation
+
+```bash
+bun run src/eval.ts
+```
+
+Orders all events (live + replay) by start time, selects candidates on the
+earliest 70% with the live promotion thresholds, and scores their hit rate
+on the newest 30%. Time-ordering avoids lookahead leakage. With only a few
+events collected, expect `candidates=0` — that is the honest answer until
+the worker accumulates more events. The base hit rate (~0.5 on noise) is the
+number to beat.

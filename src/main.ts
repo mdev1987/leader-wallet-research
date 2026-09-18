@@ -18,6 +18,8 @@ import {
   detectLatestEvent,
   LeaderAccumulator,
   parseTrades,
+  sideVolumesSol,
+  withVolumeShare,
 } from "./analysis";
 import type { DetectedEvent, TokenCandidate } from "./types";
 import { appendJsonl, initStorage, loadEventIds, loadObservations, writeLeaderReport } from "./storage";
@@ -215,15 +217,21 @@ async function main(): Promise<void> {
           }
 
           let observationCount = 0;
+          const volumes = sideVolumesSol(trades);
 
           for (const trade of trades) {
-            const observation = buildObservation(
+            const raw = buildObservation(
               event,
               trade,
               candles,
             );
 
-            if (!observation) continue;
+            if (!raw) continue;
+
+            const observation = withVolumeShare(
+              raw,
+              trade.side === "buy" ? volumes.buy : volumes.sell,
+            );
 
             await appendJsonl(paths.observationsPath, observation);
             accumulator.add(observation);

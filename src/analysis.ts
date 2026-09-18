@@ -123,6 +123,40 @@ export function detectLatestEvent(
   };
 }
 
+/**
+ * Wrapped-SOL mint. Jupiter and several other routers settle the SOL leg in
+ * WSOL token accounts instead of native SOL, so a parser that only watches
+ * native balance changes systematically misses those trades.
+ */
+export const WSOL_MINT = "So11111111111111111111111111111111111111112";
+
+/**
+ * Combined SOL-leg change for one account, in lamports.
+ *
+ * Sums the native SOL balance change with the owner's WSOL token balance
+ * change (WSOL has 9 decimals, so raw units are lamports). Returns null when
+ * the native balances are unavailable. Positive = wallet gained SOL.
+ */
+function solLegDeltaLamports(
+  tx: RawTransaction,
+  wallet: string,
+  walletIndex: number,
+): number | null {
+  const preSol = tx.meta.preBalances[walletIndex];
+  const postSol = tx.meta.postBalances[walletIndex];
+  if (preSol === undefined || postSol === undefined) return null;
+
+  let delta = postSol - preSol;
+
+  const wsolDeltas = tokenDeltasByOwner(tx, WSOL_MINT);
+  const wsol = wsolDeltas.get(wallet);
+  if (wsol && wsol.delta !== 0n) {
+    delta += Number(wsol.delta);
+  }
+
+  return delta;
+}
+
 function tokenDeltasByOwner(
   tx: RawTransaction,
   tokenMint: string,
@@ -161,11 +195,14 @@ function tokenDeltasByOwner(
 /**
  * Extract conservative buy/sell records from one transaction.
  *
- * BUY: target token balance increases while native SOL decreases.
- * SELL: target token balance decreases while native SOL increases.
+ * BUY: target token balance increases while the SOL leg (native + WSOL)
+ * decreases. SELL: target token balance decreases while the SOL leg
+ * increases.
  *
- * This deliberately avoids guessing when the balance changes do not form a
- * clear opposite-direction pair.
+ * Every owner with a target-token balance change is evaluated, not just the
+ * fee payer, so routed swaps where the trader differs from the fee payer are
+ * still attributed. This deliberately avoids guessing when the balance
+ * changes do not form a clear opposite-direction pair.
  */
 export function parseTrades(
   tx: RawTransaction,
@@ -186,12 +223,8 @@ export function parseTrades(
     const walletIndex = accountKeys.indexOf(wallet);
     if (walletIndex < 0) continue;
 
-    const preSol = tx.meta.preBalances[walletIndex];
-    const postSol = tx.meta.postBalances[walletIndex];
-    if (preSol === undefined || postSol === undefined) continue;
-
-    const solDelta = postSol - preSol;
-    if (solDelta === 0) continue;
+    const solDelta = solLegDeltaLamports(tx, wallet, walletIndex);
+    if (solDelta === null || solDelta === 0) continue;
 
     const fee = wallet === feePayer ? tx.meta.fee : 0;
 
@@ -241,6 +274,7 @@ export function buildObservation(
   event: DetectedEvent,
   trade: Trade,
   candles: Candle[],
+  opts?: { maxCandleGapSec?: number },
 ): WalletObservation | null {
   const leadSeconds = event.startTime - trade.timestamp;
 
@@ -265,14 +299,24 @@ export function buildObservation(
   // mismatch produced garbage ~+10000% returns in earlier runs.
   const base = candleAtOrBefore(candles, trade.timestamp);
 
+  // Replay candles synthesized from sparse trades can have multi-minute
+  // gaps; without a tolerance a "+60s" label could be computed from a candle
+  // printed much later. Live 1s candles pass no tolerance (Infinity).
+  const maxGapSec = opts?.maxCandleGapSec ?? Number.POSITIVE_INFINITY;
+
   for (const offset of config.analysis.forwardOffsetsSec) {
-    const future = candleAtOrAfter(
-      candles,
-      trade.timestamp + offset,
-    );
+    const target = trade.timestamp + offset;
+    const future = candleAtOrAfter(candles, target);
+
+    const baseFresh =
+      base !== null && trade.timestamp - base.unixTime <= maxGapSec;
+    const futureFresh =
+      future !== null && future.unixTime - target <= maxGapSec;
 
     forward[String(offset)] =
-      base && future ? pctChange(base.close, future.close) : null;
+      base !== null && future !== null && baseFresh && futureFresh
+        ? pctChange(base.close, future.close)
+        : null;
   }
 
   const raw60 = forward["60"] ?? null;
@@ -305,11 +349,56 @@ export function buildObservation(
     forward,
     forwardBasis: "candle",
     directionalReturn60s,
+    // Filled in later by withVolumeShare once the event totals are known.
+    sideVolumeSol: null,
+    volumeShare: null,
     signature: trade.signature,
   };
 }
 
-/** Maintain wallet-level statistics across many event observations. */
+/** Total SOL bought/sold across a set of event-window trades. */
+export function sideVolumesSol(trades: Trade[]): { buy: number; sell: number } {
+  let buy = 0;
+  let sell = 0;
+
+  for (const trade of trades) {
+    if (trade.side === "buy") buy += trade.solAmount;
+    else sell += trade.solAmount;
+  }
+
+  return { buy, sell };
+}
+
+/**
+ * Attach the trade's share of its side's event-window SOL volume.
+ *
+ * A wallet whose own trade is most of the side volume mechanically moved the
+ * pool; a wallet with a small share followed by a favorable move is stronger
+ * evidence of leadership. Rows written before this field existed keep nulls.
+ */
+export function withVolumeShare(
+  observation: WalletObservation,
+  sideVolumeSol: number,
+): WalletObservation {
+  if (!(sideVolumeSol > 0)) {
+    return { ...observation, sideVolumeSol: null, volumeShare: null };
+  }
+
+  return {
+    ...observation,
+    sideVolumeSol,
+    volumeShare: observation.solAmount / sideVolumeSol,
+  };
+}
+
+/**
+ * Maintain wallet-level statistics across many event observations.
+ *
+ * @param acceptedBases forward-return bases treated as self-consistent.
+ * Defaults to live Birdeye-candle rows only; the replay harness passes
+ * ["trade"] for trade-price-synthesized candles. Legacy rows with a missing
+ * or unknown basis are always ignored.
+ */
 export class LeaderAccumulator {
   private readonly byWallet = new Map<
     string,
@@ -319,18 +408,27 @@ export class LeaderAccumulator {
       tokens: Set<string>;
       leadSeconds: number[];
       directional60: number[];
+      volumeShares: number[];
+      sizeAdjusted60: number[];
       alignedBuyEvents: number;
       alignedSellEvents: number;
     }
   >();
+
+  constructor(private readonly acceptedBases: readonly string[] = ["candle"]) {}
 
   /** Add one aligned, pre-event observation. */
   add(observation: WalletObservation): void {
     if (!observation.alignedWithEvent) return;
     if (observation.phase !== "pre_event") return;
     // Drop legacy rows whose forwards mixed SOL trade prices with USD
-    // candle closes (forwardBasis missing or not "candle").
-    if (observation.forwardBasis !== "candle") return;
+    // candle closes (forwardBasis missing or not an accepted basis).
+    if (
+      !observation.forwardBasis ||
+      !this.acceptedBases.includes(observation.forwardBasis)
+    ) {
+      return;
+    }
     if (observation.directionalReturn60s === null) return;
 
     const state = this.byWallet.get(observation.wallet) ?? {
@@ -339,9 +437,30 @@ export class LeaderAccumulator {
       tokens: new Set<string>(),
       leadSeconds: [],
       directional60: [],
+      volumeShares: [],
+      sizeAdjusted60: [],
       alignedBuyEvents: 0,
       alignedSellEvents: 0,
     };
+
+    state.eventIds.add(observation.eventId);
+    state.tokens.add(observation.token);
+    state.leadSeconds.push(observation.leadSeconds);
+    state.directional60.push(observation.directionalReturn60s);
+
+    // Down-weight returns the wallet likely caused itself: a trade that was
+    // most of its side's event volume mechanically moved the pool, while a
+    // small trade followed by a favorable move suggests others followed.
+    // Rows without a share (written before volumeShare existed) contribute
+    // to the raw return only, so old data is never silently re-scored.
+    const share = observation.volumeShare;
+    if (share !== null && share !== undefined && Number.isFinite(share)) {
+      const clamped = Math.min(Math.max(share, 0), 1);
+      state.volumeShares.push(clamped);
+      state.sizeAdjusted60.push(
+        observation.directionalReturn60s * (1 - clamped),
+      );
+    }
 
     state.eventIds.add(observation.eventId);
     state.tokens.add(observation.token);
@@ -368,6 +487,8 @@ export class LeaderAccumulator {
         alignedSellEvents: state.alignedSellEvents,
         medianLeadSeconds: median(state.leadSeconds),
         medianDirectionalReturn60s: median(state.directional60),
+        medianVolumeShare: median(state.volumeShares),
+        medianSizeAdjustedReturn60s: median(state.sizeAdjusted60),
         positiveDirectional60Rate:
           state.directional60.length === 0
             ? null
@@ -382,9 +503,14 @@ export class LeaderAccumulator {
           row.uniqueTokens >= config.report.minLeaderTokens,
       )
       .sort((a, b) => {
-        const aReturn = a.medianDirectionalReturn60s ?? -Infinity;
-        const bReturn = b.medianDirectionalReturn60s ?? -Infinity;
-        if (aReturn !== bReturn) return bReturn - aReturn;
+        // Prefer wallets whose favorable moves they did NOT buy themselves:
+        // size-adjusted return first, raw directional as fallback for rows
+        // that predate volumeShare.
+        const aScore =
+          a.medianSizeAdjustedReturn60s ?? a.medianDirectionalReturn60s ?? -Infinity;
+        const bScore =
+          b.medianSizeAdjustedReturn60s ?? b.medianDirectionalReturn60s ?? -Infinity;
+        if (aScore !== bScore) return bScore - aScore;
         return b.leaderEvents - a.leaderEvents;
       });
   }

@@ -106,6 +106,13 @@ export type WalletObservation = {
    */
   forwardBasis?: string;
   directionalReturn60s: number | null;
+  /**
+   * Total SOL volume of the trade's side within its event window, and the
+   * trade's share of it. Null on rows written before volumeShare existed.
+   * A share near 1 means the wallet likely moved the price itself.
+   */
+  sideVolumeSol?: number | null;
+  volumeShare?: number | null;
   signature: string;
 };
 
@@ -117,6 +124,13 @@ export type WalletStats = {
   alignedSellEvents: number;
   medianLeadSeconds: number | null;
   medianDirectionalReturn60s: number | null;
+  /** Median share of event-window side volume (null when unavailable). */
+  medianVolumeShare: number | null;
+  /**
+   * Median directional return down-weighted by own volume share
+   * (heuristic v1: directional * (1 - share)). Null when no share data.
+   */
+  medianSizeAdjustedReturn60s: number | null;
   positiveDirectional60Rate: number | null;
   observations: number;
   tokens: string[];
