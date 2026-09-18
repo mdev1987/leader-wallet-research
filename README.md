@@ -203,11 +203,11 @@ Tune `eval.permutationCount` / `eval.randomSeed` in `src/config.ts`. The self-te
 Discovery supplies the candidate *universe* only — never event timing. Provider chain per cycle:
 
 ```text
-Birdeye token-list  ->  DBotX hot + surging  ->  frozen universe
- (self-heals)            (~20 credits/cycle)      (candidates.json + WATCHLIST_MINTS)
+Birdeye token-list  ->  Debot activity rank  ->  DBotX hot+surging  ->  frozen
+ (self-heals)             (free, keyless)          (~20 credits)        (candidates + WATCHLIST_MINTS)
 ```
 
-DBotX rows carry pair addresses, which seed pool labels without a metadata lookup. Filters are DBotX-native (`minMarketCapUsd`, `minHolders`, `minSolReserve`, `maxAgeHours`); the feed skews to newborn thin tokens, so thresholds stay lenient and the event detector (continuous-window + discontinuity guard) does the real selection. `DBOTX_API_KEY` goes in `.env`.
+Debot rows carry pair addresses, market cap, liquidity, volume, holders, swap counts, and smart-wallet presence, which seed pool labels without a metadata lookup. DBotX rows carry pair addresses with SOL-denominated reserves (converted via cached keyless SOL price). Filters are provider-native and lenient; the event detector (continuous-window + discontinuity guard) does the real selection. `DBOTX_API_KEY` goes in `.env`; Debot needs no key.
 
 ## Important limitations
 

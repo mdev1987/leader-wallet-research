@@ -13,6 +13,7 @@
 
 import { discoverTokens, fetchCandles, isBirdeyeAuthError, isBirdeyeRateLimit } from "./api/birdeye";
 import { discoverDbotxTokens, isDbotxAuthError } from "./api/dbotx";
+import { discoverDebotTokens, isDebotAuthError } from "./api/debot";
 import { fetchTransactionsForAddress } from "./api/helius";
 import { fetchTokenPairs } from "./api/dexscreener";
 import { config } from "./config";
@@ -297,36 +298,20 @@ async function main(): Promise<void> {
 
     try {
       if (nowMs - discoveryAt >= config.discovery.everyMs && nowMs >= birdeyeCooldownUntil) {
-        // Provider chain: Birdeye (self-heals on plan upgrade) -> DBotX
-        // hot+surging -> frozen universe. Universe only; event timing stays
-        // on Birdeye OHLCV regardless of provider.
-        let provider: "birdeye" | "dbotx" | "frozen" | "cooldown" = "frozen";
+        // Provider chain: Birdeye (self-heals on plan upgrade) -> Debot
+        // community ranking (free, attention-led) -> DBotX hot+surging ->
+        // frozen universe. Empty qualified results fall through; universe
+        // only, event timing stays on Birdeye OHLCV regardless of provider.
+        let provider: "birdeye" | "debot" | "dbotx" | "frozen" | "cooldown" = "frozen";
         let discovered: TokenCandidate[] = [];
         try {
           discovered = await discoverTokens();
-          provider = "birdeye";
+          provider = discovered.length > 0 ? "birdeye" : "frozen";
         } catch (error) {
           if (isBirdeyeAuthError(error)) {
-            // Plan-tier block on discovery (e.g. token-list needs a higher
-            // tier). Fail fast and try the fallback; crucially do NOT gate
-            // candle scans: OHLCV may still work on this key.
             console.warn(
-              `[discovery] birdeye auth blocked (HTTP ${error.status}, plan tier?) — trying dbotx`,
+              `[discovery] birdeye auth blocked (HTTP ${error.status}, plan tier?) — trying debot`,
             );
-            try {
-              if (!config.dbotx.enabled) throw new Error("dbotx provider disabled");
-              discovered = await discoverDbotxTokens();
-              provider = "dbotx";
-            } catch (inner) {
-              if (isDbotxAuthError(inner)) {
-                console.warn("[discovery] dbotx auth blocked — check DBOTX_API_KEY; frozen universe kept");
-              } else {
-                console.warn(
-                  `[discovery] dbotx failed: ${inner instanceof Error ? inner.message.slice(0, 150) : String(inner).slice(0, 150)} — frozen universe kept`,
-                );
-              }
-              provider = "frozen";
-            }
           } else if (isBirdeyeRateLimit(error)) {
             const cooldown = error.quotaExhausted
               ? config.birdeye.quotaCooldownMs
@@ -336,11 +321,40 @@ async function main(): Promise<void> {
             provider = "cooldown";
           } else {
             console.error(`[discovery] ${error instanceof Error ? error.message : String(error)}`);
-            provider = "frozen";
           }
         }
 
-        if (provider === "birdeye" || provider === "dbotx") {
+        if (provider === "frozen" && config.debot.enabled) {
+          try {
+            discovered = await discoverDebotTokens();
+            provider = discovered.length > 0 ? "debot" : "frozen";
+          } catch (error) {
+            if (isDebotAuthError(error)) {
+              console.warn("[discovery] debot auth blocked — trying dbotx");
+            } else {
+              console.warn(
+                `[discovery] debot failed: ${error instanceof Error ? error.message.slice(0, 150) : String(error).slice(0, 150)} — trying dbotx`,
+              );
+            }
+          }
+        }
+
+        if (provider === "frozen" && config.dbotx.enabled) {
+          try {
+            discovered = await discoverDbotxTokens();
+            provider = discovered.length > 0 ? "dbotx" : "frozen";
+          } catch (error) {
+            if (isDbotxAuthError(error)) {
+              console.warn("[discovery] dbotx auth blocked — check DBOTX_API_KEY; frozen universe kept");
+            } else {
+              console.warn(
+                `[discovery] dbotx failed: ${error instanceof Error ? error.message.slice(0, 150) : String(error).slice(0, 150)} — frozen universe kept`,
+              );
+            }
+          }
+        }
+
+        if (provider === "birdeye" || provider === "debot" || provider === "dbotx") {
           for (const token of discovered) {
             active.set(token.address, { token, lastSeen: nowMs });
           }

@@ -36,3 +36,7 @@ v4.1 was promoted into the main project with additive extensions, all verified i
 ## DBotX discovery fallback
 
 Birdeye token-list is plan-blocked (401) on the current key while OHLCV works, so discovery chains Birdeye -> DBotX hot+surging -> frozen universe. Verified live: hot=70 rows, surging empty (valid quiet state), mapper filters to 10 candidates with seeded pair addresses. DBotX omits holders/marketCap on most rows, so filters stay lenient and the detector selects. One cycle costs ~20 DBotX credits.
+
+## Debot activity-rank discovery
+
+Debot community-signal ranking (keyless, 5m window, only duration=5m supported upstream) slots between Birdeye and DBotX: free, attention-led, with native USD market cap/liquidity/volume plus holder/swap counts and pair addresses. Verified live: ranked=20, qualified=10 with real liquidity ($8k–$464k) and seeded pairs. Empty results fall through to DBotX; universe only, never event timing.

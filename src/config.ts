@@ -27,6 +27,18 @@ export const config = {
     maxAgeHours: 168,
   },
 
+  debot: {
+    // Keyless community-signal ranking (5m attention window). Ordered before
+    // DBotX: free, and attention + smart-wallet presence match the research
+    // goal better than raw new-token flow. Native USD units throughout.
+    enabled: true,
+    minIntervalMs: 2_000,
+    minMarketCapUsd: 10_000,
+    minHolders: 100,
+    minLiquidityUsd: 5_000,
+    maxAgeHours: 168,
+  },
+
   birdeye: {
     minIntervalMs: 3_000,
     scanEveryMs: 20_000,

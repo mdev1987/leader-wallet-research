@@ -12,6 +12,7 @@ import { buildObservation } from "./research/observations";
 import { classifyWallet } from "./research/labels";
 import { evaluateWallets } from "./research/scoring";
 import { toCandidate } from "./api/dbotx";
+import { toCandidate as toDebotCandidate } from "./api/debot";
 import type { Candle, DetectedEvent, Trade, WalletEventStats } from "./types";
 
 const wallet = "WALLET";
@@ -282,3 +283,33 @@ const invalid = toCandidate({ symbol: "BAD" }, 150, nowMs);
 if (invalid !== null) throw new Error("row without address must be skipped");
 
 console.log("discovery selftest: PASS");
+
+// --- Debot mapper: ranked row maps with pair seed; dust and stale rows filter.
+const debotRow = toDebotCandidate(
+  {
+    address: "MINT333333333333333333333333333333333333",
+    symbol: "RANKED",
+    name: "Ranked Token",
+    pair: "PAIR3333333333333333333333333333333333333",
+    creation_timestamp: Math.floor(nowMs / 1000) - 3600,
+    market_info: {
+      mkt_cap: 200_000,
+      holders: 1500,
+      volume: 900_000,
+      swaps: 9000,
+    },
+    pair_summary_info: { liquidity: 40_000 },
+  },
+  nowMs,
+);
+if (!debotRow || debotRow.pairAddress === undefined) {
+  throw new Error("ranked Debot row must map with seeded pair address");
+}
+if (!(debotRow.liquidityUsd === 40_000)) throw new Error("Debot liquidity must pass through");
+const debotDust = toDebotCandidate(
+  { address: "MINT444444444444444444444444444444444444", symbol: "DUST" },
+  nowMs,
+);
+if (debotDust !== null) throw new Error("row without market cap must be filtered");
+
+console.log("debot selftest: PASS");
