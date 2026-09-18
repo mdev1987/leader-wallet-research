@@ -23,8 +23,9 @@ import {
   withVolumeShare,
 } from "./analysis";
 import type { Candle, DetectedEvent, TokenCandidate } from "./types";
-import { appendJsonl, initStorage, loadEventIds, loadObservations, writeLeaderReport } from "./storage";
+import { appendJsonl, initStorage, loadCandidates, loadEventIds, loadObservations, loadObservedEventIds, saveCandidates, writeLeaderReport } from "./storage";
 import { sleep } from "./utils";
+import { readFile } from "node:fs/promises";
 
 function tokenLabel(token: TokenCandidate): string {
   return token.symbol || token.address.slice(0, 8);
@@ -91,6 +92,40 @@ async function main(): Promise<void> {
   // 429 / CU-limit can recover instead of being hammered every 30s.
   let birdeyeCoolDownUntil = 0;
 
+  // Restore the watchlist so a restart during a Birdeye cooldown still has
+  // tokens for the DexScreener fallback to scan. Timestamps are refreshed;
+  // the next successful Birdeye discovery re-validates the universe anyway.
+  {
+    const restored = await loadCandidates(paths.candidatesPath);
+    const seenAt = Date.now();
+    for (const token of restored.slice(0, config.discovery.maxActiveTokens)) {
+      activeCandidates.set(token.address, { token, lastSeen: seenAt });
+    }
+  }
+
+  // Re-queue detected-but-never-analyzed events (e.g. interrupted by a
+  // restart while pending). Events without a single observation row never
+  // ran analysis; processedEventIds already blocks re-detection.
+  {
+    const observed = await loadObservedEventIds(paths.observationsPath);
+    const eventsText = await readFile(paths.eventsPath, "utf8").catch(() => "");
+    let requeued = 0;
+    for (const line of eventsText.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line) as DetectedEvent;
+        if (!event?.id || observed.has(event.id) || pendingEvents.has(event.id)) {
+          continue;
+        }
+        pendingEvents.set(event.id, event);
+        requeued += 1;
+      } catch {
+        // Malformed event rows are reported by loadEventIds.
+      }
+    }
+    if (requeued > 0) console.log(`Re-queued unanalyzed events: ${requeued}`);
+  }
+
   const noteRateLimited = (error: unknown): void => {
     const exhausted = isRateLimitError(error) && error.quotaExhausted;
     const cooldown = exhausted
@@ -146,6 +181,10 @@ async function main(): Promise<void> {
             }
 
             lastDiscoveryAt = Date.now();
+            await saveCandidates(
+              paths.candidatesPath,
+              [...activeCandidates.values()].map((state) => state.token),
+            );
             console.log(`\n[discovery] active=${activeCandidates.size}`);
           } catch (error) {
             if (isRateLimitError(error)) noteRateLimited(error);

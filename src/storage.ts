@@ -1,7 +1,7 @@
 /** File-backed storage for append-only research observations and reports. */
 
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import type { WalletObservation } from "./types";
+import type { TokenCandidate, WalletObservation } from "./types";
 import { config } from "./config";
 import { LeaderAccumulator } from "./analysis";
 
@@ -10,6 +10,7 @@ export async function initStorage(): Promise<{
   eventsPath: string;
   observationsPath: string;
   leadersPath: string;
+  candidatesPath: string;
 }> {
   await mkdir(config.output.dir, { recursive: true });
 
@@ -17,6 +18,7 @@ export async function initStorage(): Promise<{
     eventsPath: `${config.output.dir}/${config.output.events}`,
     observationsPath: `${config.output.dir}/${config.output.observations}`,
     leadersPath: `${config.output.dir}/${config.output.leaders}`,
+    candidatesPath: `${config.output.dir}/candidates.json`,
   };
 }
 
@@ -45,6 +47,60 @@ export async function loadEventIds(filePath: string): Promise<Set<string>> {
   }
 
   return ids;
+}
+
+/** Event IDs that already have at least one observation row. */
+export async function loadObservedEventIds(filePath: string): Promise<Set<string>> {
+  const text = await readFile(filePath, "utf8").catch(() => "");
+  const ids = new Set<string>();
+
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+
+    try {
+      const obs = JSON.parse(line) as { eventId?: string };
+      if (obs.eventId) ids.add(obs.eventId);
+    } catch {
+      // Malformed rows are skipped by loadObservations too.
+    }
+  }
+
+  return ids;
+}
+
+/** Persist the active token universe so restarts keep a warm watchlist. */
+export async function saveCandidates(
+  filePath: string,
+  candidates: TokenCandidate[],
+): Promise<void> {
+  await writeFile(filePath, JSON.stringify(candidates), "utf8").catch((error) => {
+    console.warn(
+      `[warn] could not save candidates: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
+}
+
+/** Restore the watchlist; entries get fresh timestamps (see caller). */
+export async function loadCandidates(filePath: string): Promise<TokenCandidate[]> {
+  const text = await readFile(filePath, "utf8").catch(() => "");
+  if (!text.trim()) return [];
+
+  try {
+    const raw = JSON.parse(text) as Array<Record<string, unknown>>;
+    return raw
+      .filter((item) => typeof item.address === "string" && item.address.length > 20)
+      .map((item) => ({
+        address: String(item.address),
+        symbol: String(item.symbol ?? ""),
+        name: String(item.name ?? item.symbol ?? ""),
+        liquidityUsd: Number(item.liquidityUsd ?? 0),
+        volume1hUsd: Number(item.volume1hUsd ?? 0),
+        trade1hCount: Number(item.trade1hCount ?? 0),
+      }));
+  } catch {
+    console.warn("[warn] skipped malformed candidates file");
+    return [];
+  }
 }
 
 /** Restore wallet statistics from prior observation JSONL. */
