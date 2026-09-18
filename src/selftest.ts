@@ -1,14 +1,17 @@
 /**
- * Offline sanity checks for v4 additive wallet labeling/features.
+ * Offline sanity checks for wallet labeling/features (v4) and the
+ * permutation-null evaluator (v5).
  *
  * This does not call external APIs. It verifies pair-address labeling, the
- * five-way label shape, phase-aware aggregation, and candle-price entry fields.
+ * five-way label shape, phase-aware aggregation, candle-price entry fields,
+ * infra exclusion, and permutation determinism/bounds on a synthetic fixture.
  */
 
 import { aggregateWalletEvents, buildWalletReport } from "./research/wallets";
 import { buildObservation } from "./research/observations";
 import { classifyWallet } from "./research/labels";
-import type { Candle, DetectedEvent, Trade } from "./types";
+import { evaluateWallets } from "./research/scoring";
+import type { Candle, DetectedEvent, Trade, WalletEventStats } from "./types";
 
 const wallet = "WALLET";
 const pair = "PAIR";
@@ -159,4 +162,89 @@ if (traderRow.infrastructureEventsExcluded !== 0) {
   throw new Error("trader row must audit zero excluded infra events");
 }
 
+// --- v5 permutation-null fixture: 6 events (4 train / 2 valid at 70%) ---
+// LEAD is perfect on train (3 events, 2 tokens) and valid (2 events);
+// background is mixed. A working null must sit near the base rate with a
+// small p-value; a broken (identity) shuffle would report pValue ~= 1.
+function stat(
+  wallet: string,
+  eventId: string,
+  eventTime: number,
+  token: string,
+  positive60: boolean,
+): WalletEventStats {
+  return {
+    wallet, eventId, eventTime, token, symbol: token, eventType: "pump",
+    firstAlignedTradeTime: eventTime, lastAlignedTradeTime: eventTime,
+    firstAlignedLeadSeconds: 60, firstBuyLeadSeconds: 60, firstSellLeadSeconds: null,
+    firstBuyOffsetSec: -60, lastBuyOffsetSec: -60, netVolumeSol: 1,
+    preBreakoutTradeCount: 1,
+    alignedTradeCount: 1, alignedVolumeSol: 1,
+    buyVolumeSol: 1, sellVolumeSol: 0,
+    buyCount: 1, sellCount: 0, sideConsistency: 1,
+    earliestTradeTime: eventTime - 60, latestTradeTime: eventTime - 60,
+    maxDirectional60: positive60 ? 5 : -5,
+    medianDirectional60: positive60 ? 5 : -5,
+    buyDirectional: { "60": positive60 ? 5 : -5 },
+    sellDirectional: {},
+    positive60, medianVolumeShare: 0.01, eventLiquidityUsd: 100_000,
+    walletType: "trader", walletTypeReason: "default",
+  };
+}
+
+// NOTE: noise wallets stay at 2 train events so LEAD is the only train
+// candidate; otherwise the null has nothing to beat and the test is vacuous.
+const fixture: WalletEventStats[] = [
+  stat("LEAD", "e1", 100, "tokA", true),
+  stat("LEAD", "e2", 200, "tokB", true),
+  stat("LEAD", "e3", 300, "tokA", true),
+  stat("LEAD", "e5", 500, "tokC", true),
+  stat("LEAD", "e6", 600, "tokA", true),
+  stat("NOISE1", "e1", 100, "tokA", false),
+  stat("NOISE1", "e4", 400, "tokB", false),
+  stat("NOISE1", "e5", 500, "tokC", false),
+  stat("NOISE1", "e6", 600, "tokA", true),
+  stat("NOISE2", "e1", 100, "tokA", false),
+  stat("NOISE2", "e3", 300, "tokA", false),
+  stat("NOISE2", "e5", 500, "tokC", false),
+  stat("NOISE2", "e6", 600, "tokA", false),
+];
+
+const runA = evaluateWallets(fixture);
+const runB = evaluateWallets(fixture);
+const permA = runA.permutation;
+const permB = runB.permutation;
+
+if (permA.skipped !== null) throw new Error(`permutation skipped: ${permA.skipped}`);
+if (permA.pValue === null || permA.nullMean === null || permA.observedRate === null) {
+  throw new Error("permutation produced null statistics on testable fixture");
+}
+// Determinism: same seed must give the same null.
+if (permA.pValue !== permB.pValue || permA.nullMean !== permB.nullMean) {
+  throw new Error("permutation null is not deterministic");
+}
+// Bounds.
+for (const value of [permA.pValue, permA.nullMean, permA.observedRate]) {
+  if (!(value >= 0 && value <= 1)) throw new Error("permutation statistic out of bounds");
+}
+for (const ci of [permA.candidateCI95, permA.baseCI95]) {
+  if (ci === null || !(ci[0] >= 0 && ci[0] <= ci[1] && ci[1] <= 1)) {
+    throw new Error("bootstrap CI out of bounds");
+  }
+}
+// A perfect candidate against a mixed background must beat the null clearly.
+// (Identity shuffle would report nullMean == observed and pValue == 1.)
+if (!(permA.nullMean < permA.observedRate)) {
+  throw new Error("null mean should sit below a perfect observed rate");
+}
+if (!(permA.pValue < 0.5)) {
+  throw new Error("perfect candidate must have a small p-value");
+}
+if (runA.candidates.length !== 1 || runA.candidates[0]?.wallet !== "LEAD") {
+  throw new Error("expected exactly LEAD as the train candidate");
+}
+
 console.log("v4.1 selftest: PASS");
+console.log(
+  `v5 selftest: PASS (p=${permA.pValue.toFixed(3)} nullMean=${permA.nullMean.toFixed(3)} obs=${permA.observedRate.toFixed(2)})`,
+);

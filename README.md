@@ -184,6 +184,21 @@ train_events, validation_events
 
 `median_trade_vs_liquidity` mixes SOL event volume with USD liquidity: relative comparisons only, never an absolute dollar claim. The out-of-sample evaluator reports the same side-split leads and horizon returns separately for train and validation splits, and `diagnose` histograms parse skip reasons per window.
 
+## Significance testing (v5)
+
+With thousands of wallets, some validate well by chance — beating 50% is not evidence. Every evaluation therefore includes a wallet-shuffled permutation null over validation wallet-events (train selection fixed, event structure intact, only the wallet→performance link broken) plus bootstrap percentile intervals for candidate and base rates:
+
+```text
+permutation.resamples / .seed   # seeded RNG: same seed, same report
+permutation.observedRate         # candidate validation hit rate
+permutation.nullMean / .nullSd / .nullP95
+permutation.pValue               # P(null >= observed), +1 pseudocount
+permutation.candidateCI95 / .baseCI95
+permutation.skipped              # reason when untestable (e.g. no candidates)
+```
+
+Tune `eval.permutationCount` / `eval.randomSeed` in `src/config.ts`. The self-test asserts determinism, bounds, and a small p-value on a perfect-candidate fixture — verified by mutation testing (identity shuffle fails the test).
+
 ## Important limitations
 
 The Helius trade parser remains a balance-delta parser. `priceQuality` stays `balance-delta`. v4 does not claim exact instruction-level swap pricing.

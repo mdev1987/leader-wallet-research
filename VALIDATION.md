@@ -25,3 +25,10 @@ v4.1 was promoted into the main project with additive extensions, all verified i
 - `bun run src/replay.ts` on `helius_bun_trades.csv`: trades=1620 candles=2507 events=4 researchEvents=4 observations=564 walletEvents=227 leaders=0 — counts identical to v4.1, with side-split leads, per-horizon directionals, net volume, and pre-breakout counts populated
 - Parse skip-reason histogram ported into `diagnose`; Helius fetch bound unchanged
 - `median_trade_vs_liquidity` is intentionally mixed-unit (SOL volume / USD liquidity): relative comparisons only
+
+## v5 permutation null + bootstrap CIs
+
+`evaluateWallets` now ships a wallet-shuffled null (fixed train selection, labels permuted across scored validation entries) and bootstrap percentile intervals, all on a seeded RNG (`eval.permutationCount`, `eval.randomSeed`).
+
+- `bun run src/selftest.ts`: v5 fixture asserts determinism (two runs identical), bounds (p/null/CI in [0,1]), and a small p-value for a perfect candidate against mixed background. Observed on fixture: p=0.208 nullMean=0.504 obs=1.00 — matches the closed-form hypergeometric expectation (3/15 = 0.2).
+- Mutation-tested: an identity shuffle fails the self-test at "null mean should sit below a perfect observed rate".

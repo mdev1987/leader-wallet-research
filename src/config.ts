@@ -78,6 +78,11 @@ export const config = {
 
   eval: {
     trainFrac: 0.7,
+    // Wallet-shuffled null + bootstrap resamples. Seeded so reports are
+    // reproducible. Cheap (O(valid entries) per resample); raise for
+    // smoother tails once the dataset is large.
+    permutationCount: 1000,
+    randomSeed: 42,
   },
 
   storage: {

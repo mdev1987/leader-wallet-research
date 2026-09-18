@@ -4,12 +4,168 @@
  * Candidates are selected only from the earlier event period. Validation uses
  * later events so the report measures whether the observed wallet/event
  * relationship persists outside the period used to select the wallet.
+ *
+ * v5 adds the actual significance test: a wallet-shuffled permutation null
+ * for the candidate validation rate (labels shuffled across validation
+ * wallet-events, event structure intact) plus bootstrap percentile intervals
+ * for candidate and base rates. With thousands of wallets, some validate well
+ * by chance; beating 50% is not evidence, beating the null is.
  */
 
 import { config } from "../config";
 import type { WalletEventStats, WalletReport } from "../types";
-import { median } from "../utils";
+import { median, mulberry32, shuffleInPlace } from "../utils";
 import { isInfrastructureWalletType } from "./labels";
+
+export type PermutationNull = {
+  resamples: number;
+  seed: number;
+  /** Wallets whose validation evidence was tested (fixed real selection). */
+  testedWallets: number;
+  observedRate: number | null;
+  nullMean: number | null;
+  nullSd: number | null;
+  nullP95: number | null;
+  /** P(null rate >= observed), with +1 pseudocount. Null when untestable. */
+  pValue: number | null;
+  candidateCI95: [number, number] | null;
+  baseCI95: [number, number] | null;
+  skipped: string | null;
+};
+
+function mean(values: number[]): number | null {
+  if (values.length === 0) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function standardDeviation(values: number[], avg: number): number | null {
+  if (values.length < 2) return null;
+  const variance =
+    values.reduce((sum, value) => sum + (value - avg) ** 2, 0) /
+    (values.length - 1);
+  return Math.sqrt(variance);
+}
+
+function percentile(sortedAscending: number[], pct: number): number | null {
+  if (sortedAscending.length === 0) return null;
+  const rank = (pct / 100) * (sortedAscending.length - 1);
+  const lower = Math.floor(rank);
+  const upper = Math.ceil(rank);
+  const low = sortedAscending[lower];
+  const high = sortedAscending[upper];
+  if (low === undefined || high === undefined) return null;
+  return low + (high - low) * (rank - lower);
+}
+
+/**
+ * Wallet-shuffled null for the candidate validation rate.
+ *
+ * Shuffles wallet labels across ALL scored validation entries (candidates
+ * and background alike), then scores the entries randomly assigned to the
+ * fixed real candidate set. Event structure, returns and counts stay intact;
+ * only the wallet->performance link is broken. Train selection is never
+ * re-run inside the null: we test THESE candidates, not the procedure.
+ * Returns null when there is nothing to test (no candidates or no evidence).
+ */
+function permutationNull(
+  scoredValid: WalletEventStats[],
+  candidateWallets: ReadonlySet<string>,
+  resamples: number,
+  seed: number,
+): PermutationNull {
+  const skipped = (reason: string): PermutationNull => ({
+    resamples,
+    seed,
+    testedWallets: candidateWallets.size,
+    observedRate: null,
+    nullMean: null,
+    nullSd: null,
+    nullP95: null,
+    pValue: null,
+    candidateCI95: null,
+    baseCI95: null,
+    skipped: reason,
+  });
+
+  const pool = scoredValid.filter((entry) => entry.alignedTradeCount > 0);
+  if (pool.length === 0) return skipped("no scored validation entries");
+  if (candidateWallets.size === 0) return skipped("no candidates selected on train");
+
+  const labels = pool.map((entry) => entry.wallet);
+  const hits = pool.map((entry) => (entry.positive60 === true ? 1 : 0));
+
+  let observedHit = 0;
+  let observedTotal = 0;
+  for (let i = 0; i < pool.length; i += 1) {
+    if (!candidateWallets.has(labels[i] ?? "")) continue;
+    observedTotal += 1;
+    observedHit += hits[i] ?? 0;
+  }
+  if (observedTotal === 0) return skipped("candidates have no validation evidence");
+  const observedRate = observedHit / observedTotal;
+
+  const rand = mulberry32(seed);
+  const nullRates: number[] = [];
+  for (let iter = 0; iter < resamples; iter += 1) {
+    const shuffled = shuffleInPlace([...labels], rand);
+    let hit = 0;
+    let total = 0;
+    for (let i = 0; i < shuffled.length; i += 1) {
+      if (!candidateWallets.has(shuffled[i] ?? "")) continue;
+      total += 1;
+      hit += hits[i] ?? 0;
+    }
+    if (total > 0) nullRates.push(hit / total);
+  }
+  if (nullRates.length === 0) return skipped("null resampling produced no evidence");
+
+  const avg = mean(nullRates) ?? 0;
+  const sorted = [...nullRates].sort((a, b) => a - b);
+  const atLeastObserved = nullRates.filter((rate) => rate >= observedRate).length;
+
+  return {
+    resamples,
+    seed,
+    testedWallets: candidateWallets.size,
+    observedRate,
+    nullMean: avg,
+    nullSd: standardDeviation(nullRates, avg),
+    nullP95: percentile(sorted, 95),
+    // +1 pseudocount: P(null >= observed) never claims exactly zero.
+    pValue: (1 + atLeastObserved) / (1 + nullRates.length),
+    candidateCI95: null, // filled by caller (needs candidate-only pool)
+    baseCI95: null, // filled by caller (needs full background pool)
+    skipped: null,
+  };
+}
+
+/** Bootstrap percentile interval for a hit rate over scored entries. */
+function bootstrapCI(
+  scored: WalletEventStats[],
+  resamples: number,
+  seed: number,
+): [number, number] | null {
+  const pool = scored.filter((entry) => entry.alignedTradeCount > 0);
+  if (pool.length === 0) return null;
+
+  const hits = pool.map((entry) => (entry.positive60 === true ? 1 : 0));
+  const rand = mulberry32(seed ^ 0x9e3779b9);
+  const rates: number[] = [];
+
+  for (let iter = 0; iter < resamples; iter += 1) {
+    let hit = 0;
+    for (let i = 0; i < pool.length; i += 1) {
+      hit += hits[Math.floor(rand() * pool.length)] ?? 0;
+    }
+    rates.push(hit / pool.length);
+  }
+
+  rates.sort((a, b) => a - b);
+  const lo = percentile(rates, 2.5);
+  const hi = percentile(rates, 97.5);
+  if (lo === null || hi === null) return null;
+  return [lo, hi];
+}
 
 export function evaluateWallets(eventStats: WalletEventStats[]) {
   const ordered = [...eventStats]
@@ -157,6 +313,26 @@ export function evaluateWallets(eventStats: WalletEventStats[]) {
   const baseRate = validAligned.length > 0 ? baseHit / validAligned.length : null;
   const candidateRate = candidateCount > 0 ? candidateHit / candidateCount : null;
 
+  // v5 significance: the reported candidate rate is computed over
+  // validation-qualified candidates, so the null tests exactly that set
+  // against the full validation background (not just other candidates).
+  const nullResult = permutationNull(
+    validAligned,
+    validationQualifiedWallets,
+    config.eval.permutationCount,
+    config.eval.randomSeed,
+  );
+  nullResult.candidateCI95 = bootstrapCI(
+    qualifiedValidCandidate,
+    config.eval.permutationCount,
+    config.eval.randomSeed,
+  );
+  nullResult.baseCI95 = bootstrapCI(
+    validAligned,
+    config.eval.permutationCount,
+    config.eval.randomSeed,
+  );
+
   return {
     generatedAt: new Date().toISOString(),
     methodology: {
@@ -166,6 +342,7 @@ export function evaluateWallets(eventStats: WalletEventStats[]) {
       hit: "wallet-event has a positive median directional 60s return across its aligned pre-event trades",
       mixedWallets: "retained; side consistency is reported, not used as a hard exclusion",
       infrastructure: "pool/router/program wallet-events are retained in raw data but excluded from candidate and validation evidence",
+      significance: "wallet-shuffled permutation null over validation wallet-events (fixed train selection); bootstrap percentile CIs; seeded RNG",
       crashEvents: "excluded from research observations",
       validationMinimumEvents: config.report.minValidationEvents,
     },
@@ -185,6 +362,7 @@ export function evaluateWallets(eventStats: WalletEventStats[]) {
     lift: baseRate !== null && candidateRate !== null && baseRate > 0
       ? candidateRate / baseRate
       : null,
+    permutation: nullResult,
     candidates: rows,
   };
 }
