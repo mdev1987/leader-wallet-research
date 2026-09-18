@@ -27,6 +27,21 @@ export const config = {
     maxRetryDelayMs: 30_000,
     // After an explicit 429 / CU-limit, skip Birdeye calls for this long.
     rateLimitCooldownMs: 90_000,
+    // Spent compute-unit quota: retries cannot help, so back off long and
+    // let the DexScreener fallback carry detection until the budget refills.
+    quotaCooldownMs: 30 * 60_000,
+  },
+
+  dex: {
+    // Keyless fallback price path while Birdeye is cooling down. One batch
+    // spot request per scan cycle — trivial load against the free tier.
+    enabled: true,
+    minIntervalMs: 2_000,
+    // Spot samples are bucketed into candles of this width. Coarser than
+    // Birdeye 1s candles: same detector thresholds, lower resolution.
+    candleBucketSec: 30,
+    // Per-token ring buffer cap (~4h at one sample per 30s cycle).
+    maxSamplesPerToken: 480,
   },
 
   event: {

@@ -315,7 +315,7 @@ export function buildObservation(
   event: DetectedEvent,
   trade: Trade,
   candles: Candle[],
-  opts?: { maxCandleGapSec?: number },
+  opts?: { maxCandleGapSec?: number; basis?: string },
 ): WalletObservation | null {
   const leadSeconds = event.startTime - trade.timestamp;
 
@@ -388,7 +388,10 @@ export function buildObservation(
     tokenAmount: trade.tokenAmount,
     tradePriceSol: trade.priceSol,
     forward,
-    forwardBasis: "candle",
+    // "candle" (Birdeye USD), "dex" (DexScreener USD fallback) and "trade"
+    // (replay trade-price candles) are all self-consistent close-to-close
+    // bases; legacy rows with mixed units carry no basis and are ignored.
+    forwardBasis: opts?.basis ?? "candle",
     directionalReturn60s,
     // Filled in later by withVolumeShare once the event totals are known.
     sideVolumeSol: null,
@@ -456,9 +459,9 @@ type LeaderEntry = {
  * accumulators and distributors pass.
  *
  * @param acceptedBases forward-return bases treated as self-consistent.
- * Defaults to live Birdeye-candle rows only; the replay harness passes
- * ["trade"] for trade-price-synthesized candles. Legacy rows with a missing
- * or unknown basis are always ignored.
+ * Live rows are Birdeye candles ("candle") or the DexScreener USD fallback
+ * ("dex"); the replay harness passes ["trade"] for trade-price-synthesized
+ * candles. Legacy rows with a missing or unknown basis are always ignored.
  */
 export class LeaderAccumulator {
   private readonly byWallet = new Map<
@@ -471,7 +474,7 @@ export class LeaderAccumulator {
     }
   >();
 
-  constructor(private readonly acceptedBases: readonly string[] = ["candle"]) {}
+  constructor(private readonly acceptedBases: readonly string[] = ["candle", "dex"]) {}
 
   /** Add one observation. Unaligned rows shape the side mix but never score. */
   add(observation: WalletObservation): void {

@@ -11,6 +11,7 @@
  */
 
 import { discoverTokens, fetchCandles, isRateLimitError } from "./api/birdeye";
+import { DexSampler } from "./api/dexscreener";
 import { fetchTransactionsForAddress } from "./api/helius";
 import { config } from "./config";
 import {
@@ -21,7 +22,7 @@ import {
   sideVolumesSol,
   withVolumeShare,
 } from "./analysis";
-import type { DetectedEvent, TokenCandidate } from "./types";
+import type { Candle, DetectedEvent, TokenCandidate } from "./types";
 import { appendJsonl, initStorage, loadEventIds, loadObservations, writeLeaderReport } from "./storage";
 import { sleep } from "./utils";
 
@@ -54,6 +55,36 @@ async function main(): Promise<void> {
   >();
   const lastEventTimeByToken = new Map<string, number>();
   const pendingEvents = new Map<string, DetectedEvent>();
+  // DexScreener spot buffer: sampled every cycle (even while Birdeye is
+  // healthy) so fallback candles are warm the moment a cooldown starts.
+  const dexSampler = new DexSampler();
+
+  /** Dedupe, cooldown-gate, persist and log one detected event. */
+  const ingestEvent = async (event: DetectedEvent): Promise<boolean> => {
+    if (processedEventIds.has(event.id) || pendingEvents.has(event.id)) {
+      return false;
+    }
+
+    const lastEvent = lastEventTimeByToken.get(event.token.address) ?? 0;
+    if (event.startTime - lastEvent < config.event.cooldownSec) {
+      return false;
+    }
+
+    lastEventTimeByToken.set(event.token.address, event.startTime);
+    pendingEvents.set(event.id, event);
+    processedEventIds.add(event.id);
+
+    await appendJsonl(paths.eventsPath, event);
+
+    console.log(
+      `[event] ${event.type.toUpperCase()} ${tokenLabel(event.token)} ` +
+        `move=${event.movePct.toFixed(2)}% ` +
+        `accel=${event.accelerationPct.toFixed(2)}% ` +
+        `vol=${event.volumeAcceleration.toFixed(2)}x ` +
+        `start=${new Date(event.startTime * 1000).toISOString()}`,
+    );
+    return true;
+  };
 
   let lastDiscoveryAt = 0;
   // While this timestamp is in the future, skip all Birdeye calls so a
@@ -61,12 +92,14 @@ async function main(): Promise<void> {
   let birdeyeCoolDownUntil = 0;
 
   const noteRateLimited = (error: unknown): void => {
-    const cooldown =
-      (isRateLimitError(error) && error.retryAfterMs) ||
-      config.birdeye.rateLimitCooldownMs;
+    const exhausted = isRateLimitError(error) && error.quotaExhausted;
+    const cooldown = exhausted
+      ? config.birdeye.quotaCooldownMs
+      : (isRateLimitError(error) && error.retryAfterMs) ||
+        config.birdeye.rateLimitCooldownMs;
     birdeyeCoolDownUntil = Date.now() + cooldown;
     console.warn(
-      `[ratelimit] Birdeye limited, backing off for ${(cooldown / 1000).toFixed(0)}s ` +
+      `[ratelimit] Birdeye ${exhausted ? "quota exhausted" : "limited"}, backing off for ${(cooldown / 1000).toFixed(0)}s ` +
         `until ${new Date(birdeyeCoolDownUntil).toISOString()}: ` +
         `${error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200)}`,
     );
@@ -128,8 +161,18 @@ async function main(): Promise<void> {
       // ---------------------------------------------------------------
       // Look for a local pump/dump on each active token.
       // One token's 429 must not block the other tokens.
+      // While Birdeye cools down, detect on DexScreener spot candles
+      // instead of stalling (Helius analysis keeps working throughout).
       // ---------------------------------------------------------------
-      if (Date.now() >= birdeyeCoolDownUntil) {
+      const birdeyeDown = Date.now() < birdeyeCoolDownUntil;
+
+      // Keep the fallback buffer warm regardless of Birdeye state: one
+      // keyless batch request per cycle for every watched token.
+      if (activeCandidates.size > 0) {
+        await dexSampler.sample([...activeCandidates.keys()]);
+      }
+
+      if (!birdeyeDown) {
         for (const { token } of activeCandidates.values()) {
           let candles;
           try {
@@ -149,33 +192,26 @@ async function main(): Promise<void> {
             continue;
           }
 
-        const event = detectLatestEvent(token, candles);
-        if (!event) continue;
-        if (processedEventIds.has(event.id)) continue;
-        if (pendingEvents.has(event.id)) continue;
-
-        const lastEvent = lastEventTimeByToken.get(token.address) ?? 0;
-        if (
-          event.startTime - lastEvent <
-          config.event.cooldownSec
-        ) {
-          continue;
+          const event = detectLatestEvent(token, candles);
+          if (event) await ingestEvent(event);
         }
+      } else if (config.dex.enabled && activeCandidates.size > 0) {
+        let covered = 0;
+        for (const { token } of activeCandidates.values()) {
+          const candles = dexSampler.candles(
+            token.address,
+            now - config.birdeye.candleLookbackSec,
+            now,
+          );
+          if (candles.length === 0) continue;
+          covered += 1;
 
-        lastEventTimeByToken.set(token.address, event.startTime);
-        pendingEvents.set(event.id, event);
-        processedEventIds.add(event.id);
-
-        await appendJsonl(paths.eventsPath, event);
-
+          const event = detectLatestEvent(token, candles);
+          if (event) await ingestEvent(event);
+        }
         console.log(
-          `[event] ${event.type.toUpperCase()} ${tokenLabel(token)} ` +
-            `move=${event.movePct.toFixed(2)}% ` +
-            `accel=${event.accelerationPct.toFixed(2)}% ` +
-            `vol=${event.volumeAcceleration.toFixed(2)}x ` +
-            `start=${new Date(event.startTime * 1000).toISOString()}`,
+          `[dex] fallback scan tokens=${activeCandidates.size} withSamples=${covered}`,
         );
-        }
       } else {
         console.log("[ratelimit] skipping candle scan (cooldown active)");
       }
@@ -201,19 +237,36 @@ async function main(): Promise<void> {
             parseTrades(tx, event.token.address),
           );
 
-          let candles;
-          try {
-            candles = await fetchCandles(
+          // Forward-return candles: prefer Birdeye 1s candles, but fall back
+          // to DexScreener spot samples during Birdeye cooldowns so pending
+          // events (Helius data is unaffected) keep resolving. Basis labels
+          // keep the two USD-denominated sources distinguishable downstream.
+          let candles: Candle[];
+          let basis = "candle";
+          if (Date.now() >= birdeyeCoolDownUntil) {
+            try {
+              candles = await fetchCandles(
+                event.token.address,
+                event.startTime - config.analysis.preSec,
+                event.endTime + requiredFutureSec + 5,
+              );
+            } catch (error) {
+              if (isRateLimitError(error)) {
+                noteRateLimited(error);
+                continue; // keep pending, retry next iteration
+              }
+              throw error;
+            }
+          } else if (config.dex.enabled) {
+            candles = dexSampler.candles(
               event.token.address,
               event.startTime - config.analysis.preSec,
               event.endTime + requiredFutureSec + 5,
             );
-          } catch (error) {
-            if (isRateLimitError(error)) {
-              noteRateLimited(error);
-              continue; // keep pending, retry next iteration
-            }
-            throw error;
+            basis = "dex";
+            if (candles.length < 2) continue; // buffer warming up; keep pending
+          } else {
+            continue; // cooling down with fallback disabled; keep pending
           }
 
           let observationCount = 0;
@@ -224,6 +277,7 @@ async function main(): Promise<void> {
               event,
               trade,
               candles,
+              { basis },
             );
 
             if (!raw) continue;

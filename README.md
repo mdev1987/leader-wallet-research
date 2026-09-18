@@ -64,11 +64,24 @@ timeout 900 bun run src/main.ts 2>&1 | tee live_run.log
 Expected while limited: `[ratelimit] Birdeye 429 ... retrying in ...` and
 `[ratelimit] ... backing off ...` lines, then normal
 `[discovery] / [event] / [analysis]` lines once quota recovers.
+Two backoff tiers: transient throttles retry with backoff and cool down 90s;
+a spent compute-unit quota fails fast (no retry burn) and cools down 30 min.
 Progress is append-only and resumable: re-running picks up
 `data/events.jsonl` + `data/wallet_observations.jsonl` and rewrites
 `data/leader_wallets.json`. If 429s persist, raise
 `birdeye.minIntervalMs` / `scanEveryMs` or lower `maxActiveTokens` in
 `src/config.ts`.
+
+## DexScreener fallback (secondary price path)
+
+While Birdeye cools down, the worker keeps detecting events and labeling
+forward returns from DexScreener spot samples (keyless batch quotes, one
+request per scan cycle) instead of stalling. Helius analysis is unaffected
+throughout. Fallback rows carry `forwardBasis: "dex"` (USD closes, same
+denomination as Birdeye `"candle"` rows). Resolution is coarser (~30s
+samples vs 1s candles) and the sample buffer needs ~45 min from boot before
+fallback detection can fire — it is a continuity bridge for long outages,
+not a replacement for Birdeye discovery.
 
 Output files (`data/` is gitignored):
 
@@ -86,8 +99,12 @@ src/
   main.ts        # long-running worker: discover → detect → analyze → report
   config.ts      # all thresholds in one place (tune without touching logic)
   analysis.ts    # pure logic: event detection, trade parsing, wallet scoring
+  replay.ts      # offline backtest over historical compact trades (no APIs)
+  eval.ts        # train/valid evaluation: do past leaders lead future pumps?
+  diagnose.ts    # parse-coverage histogram for any token window (read-only)
   api/
     birdeye.ts   # token discovery + 1s OHLCV (retry + rate-limit backoff)
+    dexscreener.ts  # keyless spot sampler: fallback candles when Birdeye is down
     helius.ts    # event-window getTransactionsForAddress client
   storage.ts     # append-only JSONL + leader report
   types.ts / utils.ts

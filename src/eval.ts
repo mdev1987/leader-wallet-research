@@ -23,7 +23,7 @@ import { config } from "./config";
 import type { WalletObservation } from "./types";
 import { median } from "./utils";
 
-const ACCEPTED_BASES = new Set(["candle", "trade"]);
+const ACCEPTED_BASES = new Set(["candle", "dex", "trade"]);
 
 function argValue(args: string[], name: string, fallback: string): string {
   const index = args.indexOf(name);

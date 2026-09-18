@@ -29,12 +29,24 @@ const limiter = new RateLimiter(config.birdeye.minIntervalMs);
 export class BirdeyeRateLimitError extends Error {
   readonly status: number;
   readonly retryAfterMs: number;
+  /**
+   * True when the compute-unit quota itself is spent (as opposed to a
+   * transient per-second throttle). Retrying is useless — the caller must
+   * cool down long instead of burning the refilling quota.
+   */
+  readonly quotaExhausted: boolean;
 
-  constructor(status: number, message: string, retryAfterMs: number) {
+  constructor(
+    status: number,
+    message: string,
+    retryAfterMs: number,
+    quotaExhausted = false,
+  ) {
     super(message);
     this.name = "BirdeyeRateLimitError";
     this.status = status;
     this.retryAfterMs = retryAfterMs;
+    this.quotaExhausted = quotaExhausted;
   }
 }
 
@@ -64,6 +76,11 @@ function isRetriableResponse(status: number, bodyText: string): boolean {
     status === 400 &&
     /compute units|too many requests|rate limit/i.test(bodyText)
   );
+}
+
+/** True when the quota itself is spent — retries cannot help. */
+function isQuotaExhausted(bodyText: string): boolean {
+  return /compute units/i.test(bodyText);
 }
 
 async function requestJson<T>(
@@ -97,6 +114,17 @@ async function requestJson<T>(
       if (json.success === false) {
         const message = json.message ?? "unknown error";
         if (/compute units|too many requests|rate limit/i.test(message)) {
+          // Spent quota fails fast: burning retries against an empty budget
+          // consumes the refill as fast as it arrives and never recovers.
+          // Transient throttles keep the exponential-backoff retry loop.
+          if (isQuotaExhausted(message)) {
+            throw new BirdeyeRateLimitError(
+              400,
+              `Birdeye error: ${message}`,
+              config.birdeye.quotaCooldownMs,
+              true,
+            );
+          }
           const delay = Math.min(
             config.birdeye.baseRetryDelayMs * 2 ** Math.min(attempt, 4),
             config.birdeye.maxRetryDelayMs,
@@ -112,6 +140,15 @@ async function requestJson<T>(
     }
 
     const bodyText = await response.text().catch(() => "");
+
+    if (isQuotaExhausted(bodyText)) {
+      throw new BirdeyeRateLimitError(
+        response.status,
+        `Birdeye HTTP ${response.status}: ${bodyText.slice(0, 300) || response.statusText}`,
+        config.birdeye.quotaCooldownMs,
+        true,
+      );
+    }
 
     if (
       isRetriableResponse(response.status, bodyText) &&

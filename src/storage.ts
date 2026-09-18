@@ -85,6 +85,8 @@ export async function writeLeaderReport(
           acceleration: `${config.event.accelerationPct}% over ${config.event.accelerationSec}s`,
           forwardBasis:
             "candle-to-candle USD closes; dump-sell 60s returns sign-flipped so + means price fell",
+          forwardBases:
+            "candle = Birdeye 1s USD; dex = DexScreener spot-sample USD fallback during Birdeye cooldowns",
           volumeShare:
             "trade SOL / same-side event-window SOL volume; size-adjusted return = directional * (1 - share), primary sort key",
           directionConsistency:

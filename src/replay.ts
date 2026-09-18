@@ -242,11 +242,12 @@ async function main(): Promise<void> {
     for (const trade of windowTrades) {
       const rawObservation = buildObservation(event, trade, candles, {
         maxCandleGapSec: Number.isFinite(gapSec) ? gapSec : 5,
+        basis: "trade",
       });
       if (!rawObservation) continue;
 
       const observation = withVolumeShare(
-        { ...rawObservation, forwardBasis: "trade" },
+        rawObservation,
         trade.side === "buy" ? volumes.buy : volumes.sell,
       );
       observationLines.push(JSON.stringify(observation));
