@@ -37,7 +37,7 @@ import {
   replaceJson,
   saveCandidates,
 } from "./storage";
-import type { DetectedEvent, TokenCandidate, WalletObservation } from "./types";
+import type { DetectedEvent, RawTransaction, TokenCandidate, WalletObservation } from "./types";
 import { formatUtc, sleep } from "./utils";
 
 function label(token: TokenCandidate): string {
@@ -106,6 +106,8 @@ async function main(): Promise<void> {
   const lastEvent = lastEventByToken(parsedEvents);
   const observedEventIds = new Set(observations.map((observation) => observation.eventId));
   const pendingEvents = new Map<string, DetectedEvent>();
+  // Heavy Helius windows cached per pending event (cleared on completion).
+  const eventTransactions = new Map<string, RawTransaction[]>();
   for (const event of parsedEvents) {
     if (event.type !== "crash" && !observedEventIds.has(event.id)) {
       pendingEvents.set(event.id, event);
@@ -222,16 +224,24 @@ async function main(): Promise<void> {
     const requiredFuture = Math.max(...config.analysis.forwardOffsetsSec);
     if (now < event.confirmedAt + requiredFuture) return false;
 
-    const transactions = await fetchTransactionsForAddress(
-      event.token.address,
-      event.accelerationStart - config.analysis.preSec,
-      event.confirmedAt + config.analysis.postSec,
-      { maxTransactions: config.helius.maxTransactionsPerEvent },
-    );
+    // Cache the heavy Helius fetch per pending event: when forward-candle
+    // labeling fails on Birdeye limits, retries must not re-download the
+    // same transaction window every cycle.
+    let transactions = eventTransactions.get(event.id);
+    if (!transactions) {
+      transactions = await fetchTransactionsForAddress(
+        event.token.address,
+        event.accelerationStart - config.analysis.preSec,
+        event.confirmedAt + config.analysis.postSec,
+        { maxTransactions: config.helius.maxTransactionsPerEvent },
+      );
+      eventTransactions.set(event.id, transactions);
+    }
 
     const trades = transactions.flatMap((tx) => parseTrades(tx, event.token.address));
     if (trades.length === 0) {
       console.log(`[analysis] ${label(event.token)} no parsed trades`);
+      eventTransactions.delete(event.id);
       return true;
     }
 
@@ -269,6 +279,7 @@ async function main(): Promise<void> {
         `rss=${Math.round(process.memoryUsage().rss / 1048576)}MB`,
     );
     await refreshReports();
+    eventTransactions.delete(event.id);
     return true;
   }
 
