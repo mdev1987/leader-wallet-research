@@ -185,7 +185,6 @@ train_events, validation_events
 `median_trade_vs_liquidity` mixes SOL event volume with USD liquidity: relative comparisons only, never an absolute dollar claim. The out-of-sample evaluator reports the same side-split leads and horizon returns separately for train and validation splits, and `diagnose` histograms parse skip reasons per window.
 
 ## Significance testing (v5)
-
 With thousands of wallets, some validate well by chance — beating 50% is not evidence. Every evaluation therefore includes a wallet-shuffled permutation null over validation wallet-events (train selection fixed, event structure intact, only the wallet→performance link broken) plus bootstrap percentile intervals for candidate and base rates:
 
 ```text
@@ -198,6 +197,17 @@ permutation.skipped              # reason when untestable (e.g. no candidates)
 ```
 
 Tune `eval.permutationCount` / `eval.randomSeed` in `src/config.ts`. The self-test asserts determinism, bounds, and a small p-value on a perfect-candidate fixture — verified by mutation testing (identity shuffle fails the test).
+
+## Discovery providers
+
+Discovery supplies the candidate *universe* only — never event timing. Provider chain per cycle:
+
+```text
+Birdeye token-list  ->  DBotX hot + surging  ->  frozen universe
+ (self-heals)            (~20 credits/cycle)      (candidates.json + WATCHLIST_MINTS)
+```
+
+DBotX rows carry pair addresses, which seed pool labels without a metadata lookup. Filters are DBotX-native (`minMarketCapUsd`, `minHolders`, `minSolReserve`, `maxAgeHours`); the feed skews to newborn thin tokens, so thresholds stay lenient and the event detector (continuous-window + discontinuity guard) does the real selection. `DBOTX_API_KEY` goes in `.env`.
 
 ## Important limitations
 

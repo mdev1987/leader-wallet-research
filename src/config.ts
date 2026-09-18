@@ -13,6 +13,20 @@ export const config = {
     sortType: "desc",
   },
 
+  dbotx: {
+    // Fallback discovery universe when Birdeye token-list is plan-blocked.
+    // One cycle = hot + surging (~20 credits). Filters are intentionally
+    // lenient: the feed skews to newborn thin tokens, the event detector
+    // (continuous-window + discontinuity guard) does the real selection,
+    // and DBotX omits holders/marketCap on most rows.
+    enabled: true,
+    minIntervalMs: 1_500,
+    minMarketCapUsd: 0,
+    minHolders: 0,
+    minSolReserve: 0.1,
+    maxAgeHours: 168,
+  },
+
   birdeye: {
     minIntervalMs: 3_000,
     scanEveryMs: 20_000,
@@ -98,6 +112,7 @@ export const config = {
   api: {
     birdeyeKey: process.env.BIRDEYE_API_KEY,
     heliusKey: process.env.HELIUS_API_KEY,
+    dbotxKey: process.env.DBOTX_API_KEY,
   },
 
   http: {

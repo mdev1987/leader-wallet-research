@@ -32,3 +32,7 @@ v4.1 was promoted into the main project with additive extensions, all verified i
 
 - `bun run src/selftest.ts`: v5 fixture asserts determinism (two runs identical), bounds (p/null/CI in [0,1]), and a small p-value for a perfect candidate against mixed background. Observed on fixture: p=0.208 nullMean=0.504 obs=1.00 — matches the closed-form hypergeometric expectation (3/15 = 0.2).
 - Mutation-tested: an identity shuffle fails the self-test at "null mean should sit below a perfect observed rate".
+
+## DBotX discovery fallback
+
+Birdeye token-list is plan-blocked (401) on the current key while OHLCV works, so discovery chains Birdeye -> DBotX hot+surging -> frozen universe. Verified live: hot=70 rows, surging empty (valid quiet state), mapper filters to 10 candidates with seeded pair addresses. DBotX omits holders/marketCap on most rows, so filters stay lenient and the detector selects. One cycle costs ~20 DBotX credits.

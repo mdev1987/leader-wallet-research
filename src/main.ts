@@ -12,6 +12,7 @@
  */
 
 import { discoverTokens, fetchCandles, isBirdeyeAuthError, isBirdeyeRateLimit } from "./api/birdeye";
+import { discoverDbotxTokens, isDbotxAuthError } from "./api/dbotx";
 import { fetchTransactionsForAddress } from "./api/helius";
 import { fetchTokenPairs } from "./api/dexscreener";
 import { config } from "./config";
@@ -167,7 +168,17 @@ async function main(): Promise<void> {
     lastEvent.set(event.token.address, event.accelerationStart);
 
     let labeledEvent = event;
-    try {
+    if (event.token.pairAddress) {
+      // Discovery already supplied this token's pair (DBotX feed): seed the
+      // label directly and skip the metadata lookup for this event.
+      labeledEvent = {
+        ...event,
+        poolAddresses: [event.token.pairAddress],
+        poolPairs: [],
+        poolLabelSource: "discovery-seed",
+      };
+      console.log(`[labels] ${label(event.token)} pair-addresses=1 (seeded)`);
+    } else try {
       const pairs = await fetchTokenPairs(event.token.address);
       labeledEvent = {
         ...event,
@@ -286,8 +297,50 @@ async function main(): Promise<void> {
 
     try {
       if (nowMs - discoveryAt >= config.discovery.everyMs && nowMs >= birdeyeCooldownUntil) {
+        // Provider chain: Birdeye (self-heals on plan upgrade) -> DBotX
+        // hot+surging -> frozen universe. Universe only; event timing stays
+        // on Birdeye OHLCV regardless of provider.
+        let provider: "birdeye" | "dbotx" | "frozen" | "cooldown" = "frozen";
+        let discovered: TokenCandidate[] = [];
         try {
-          const discovered = await discoverTokens();
+          discovered = await discoverTokens();
+          provider = "birdeye";
+        } catch (error) {
+          if (isBirdeyeAuthError(error)) {
+            // Plan-tier block on discovery (e.g. token-list needs a higher
+            // tier). Fail fast and try the fallback; crucially do NOT gate
+            // candle scans: OHLCV may still work on this key.
+            console.warn(
+              `[discovery] birdeye auth blocked (HTTP ${error.status}, plan tier?) — trying dbotx`,
+            );
+            try {
+              if (!config.dbotx.enabled) throw new Error("dbotx provider disabled");
+              discovered = await discoverDbotxTokens();
+              provider = "dbotx";
+            } catch (inner) {
+              if (isDbotxAuthError(inner)) {
+                console.warn("[discovery] dbotx auth blocked — check DBOTX_API_KEY; frozen universe kept");
+              } else {
+                console.warn(
+                  `[discovery] dbotx failed: ${inner instanceof Error ? inner.message.slice(0, 150) : String(inner).slice(0, 150)} — frozen universe kept`,
+                );
+              }
+              provider = "frozen";
+            }
+          } else if (isBirdeyeRateLimit(error)) {
+            const cooldown = error.quotaExhausted
+              ? config.birdeye.quotaCooldownMs
+              : error.retryAfterMs || config.birdeye.rateLimitCooldownMs;
+            birdeyeCooldownUntil = Date.now() + cooldown;
+            console.warn(`[birdeye] cooldown=${Math.round(cooldown / 1000)}s`);
+            provider = "cooldown";
+          } else {
+            console.error(`[discovery] ${error instanceof Error ? error.message : String(error)}`);
+            provider = "frozen";
+          }
+        }
+
+        if (provider === "birdeye" || provider === "dbotx") {
           for (const token of discovered) {
             active.set(token.address, { token, lastSeen: nowMs });
           }
@@ -302,26 +355,10 @@ async function main(): Promise<void> {
 
           await saveCandidates(candidatesPath, retained.map((state) => state.token));
           discoveryAt = nowMs;
-          console.log(`[discovery] active=${active.size}`);
-        } catch (error) {
-          if (isBirdeyeAuthError(error)) {
-            // Plan-tier block on discovery (e.g. token-list needs a higher
-            // tier). Fail fast, retry next discovery interval, and crucially
-            // do NOT gate candle scans: OHLCV may still work on this key.
-            discoveryAt = nowMs;
-            console.warn(
-              `[discovery] auth blocked (HTTP ${error.status}, plan tier?): ` +
-                `${error.message.slice(0, 150)} — frozen universe kept`,
-            );
-          } else if (isBirdeyeRateLimit(error)) {
-            const cooldown = error.quotaExhausted
-              ? config.birdeye.quotaCooldownMs
-              : error.retryAfterMs || config.birdeye.rateLimitCooldownMs;
-            birdeyeCooldownUntil = Date.now() + cooldown;
-            console.warn(`[birdeye] cooldown=${Math.round(cooldown / 1000)}s`);
-          } else {
-            console.error(`[discovery] ${error instanceof Error ? error.message : String(error)}`);
-          }
+          console.log(`[discovery] provider=${provider} active=${active.size}`);
+        } else if (provider === "frozen") {
+          // Retry next discovery interval instead of hot-looping every cycle.
+          discoveryAt = nowMs;
         }
       }
 

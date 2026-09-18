@@ -11,6 +11,7 @@ import { aggregateWalletEvents, buildWalletReport } from "./research/wallets";
 import { buildObservation } from "./research/observations";
 import { classifyWallet } from "./research/labels";
 import { evaluateWallets } from "./research/scoring";
+import { toCandidate } from "./api/dbotx";
 import type { Candle, DetectedEvent, Trade, WalletEventStats } from "./types";
 
 const wallet = "WALLET";
@@ -248,3 +249,36 @@ console.log("v4.1 selftest: PASS");
 console.log(
   `v5 selftest: PASS (p=${permA.pValue.toFixed(3)} nullMean=${permA.nullMean.toFixed(3)} obs=${permA.observedRate.toFixed(2)})`,
 );
+
+// --- DBotX mapper: hot-shape row maps, sparse/new-shape row is filtered
+// (no market cap), invalid row is skipped. Thresholds come from config.
+const nowMs = Date.now();
+const mapped = toCandidate(
+  {
+    token: "MINT111111111111111111111111111111111111",
+    symbol: "HOT",
+    name: "Hot Token",
+    marketCap: 50_000,
+    holders: 200,
+    solReserve: 10,
+    buyAndSellTimes1h: 500,
+    pair: "PAIR1111111111111111111111111111111111111",
+    tokenCreatedAt: nowMs - 3_600_000,
+  },
+  150,
+  nowMs,
+);
+if (!mapped || mapped.address === "" || mapped.pairAddress === undefined) {
+  throw new Error("hot-shape DBotX row must map with seeded pair address");
+}
+if (!(mapped.liquidityUsd > 0)) throw new Error("SOL reserve must convert to USD liquidity");
+const thin = toCandidate(
+  { token: "MINT222222222222222222222222222222222222", symbol: "NEW" },
+  150,
+  nowMs,
+);
+if (thin !== null) throw new Error("row without market cap must be filtered");
+const invalid = toCandidate({ symbol: "BAD" }, 150, nowMs);
+if (invalid !== null) throw new Error("row without address must be skipped");
+
+console.log("discovery selftest: PASS");

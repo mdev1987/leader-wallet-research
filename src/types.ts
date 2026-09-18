@@ -38,6 +38,8 @@ export type TokenCandidate = {
   volume1hUsd: number;
   trade1hCount: number;
   recentListingTime?: number | null;
+  /** Known pair/vault address (e.g. from DBotX discovery); seeds pool labels. */
+  pairAddress?: string;
 };
 
 export type TokenPairMetadata = {
@@ -71,7 +73,7 @@ export type DetectedEvent = {
   /** DexScreener pair addresses captured for this token at event time. */
   poolAddresses?: string[];
   poolPairs?: TokenPairMetadata[];
-  poolLabelSource?: "dexscreener-token-pairs" | "unavailable";
+  poolLabelSource?: "dexscreener-token-pairs" | "discovery-seed" | "unavailable";
 };
 
 export type RawTokenBalance = {
