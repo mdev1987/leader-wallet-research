@@ -12,4 +12,11 @@ declare const process: {
   env: Record<string, string | undefined>;
   exit(code?: number): never;
   on(signal: string, listener: () => void): void;
+  memoryUsage(): {
+    rss: number;
+    heapTotal: number;
+    heapUsed: number;
+    external: number;
+    arrayBuffers: number;
+  };
 };
