@@ -1,10 +1,10 @@
 /**
  * Debot community-signal discovery provider.
  *
- * Keyless channel-activity ranking (5m window): tokens drawing community
- * call attention right now, with market cap, liquidity, volume, holder and
- * swap counts plus smart-wallet presence. Only duration=5m is supported
- * upstream; other durations return code 1.
+ * Keyless channel-activity ranking (5m sustained + 1m ignition windows):
+ * tokens drawing community call attention right now, with market cap,
+ * liquidity, volume, holder and swap counts plus smart-wallet presence.
+ * Only duration=5m/1m are supported upstream; others return code 1.
  *
  * Supplies the candidate *universe* only — event timing stays on Birdeye 1s
  * OHLCV and attribution on Helius, so the single-price-source policy holds.
@@ -19,7 +19,6 @@ import { sleep, toNumber } from "../utils";
 
 const BASE_URL = "https://debot.ai";
 const CHAIN = "solana";
-const DURATION = "5m";
 
 export class DebotError extends Error {
   readonly status: number;
@@ -65,13 +64,16 @@ function pairLiquidity(pool: DebotRankedToken): number {
   return toNumber((summary as Record<string, unknown>).liquidity, 0);
 }
 
-/** Channel-activity ranking for one chain (5m window). */
-export async function fetchActivityRank(limit: number): Promise<DebotRankedToken[]> {
+/** Channel-activity ranking for one chain. Only duration=5m/1m are supported upstream. */
+export async function fetchActivityRank(
+  limit: number,
+  duration: "5m" | "1m" = "5m",
+): Promise<DebotRankedToken[]> {
   await limiter.wait();
 
   const url =
     `${BASE_URL}/api/community/signal/channel/activity/rank` +
-    `?chain=${CHAIN}&limit=${Math.max(1, Math.floor(limit))}&duration=${DURATION}`;
+    `?chain=${CHAIN}&limit=${Math.max(1, Math.floor(limit))}&duration=${duration}`;
 
   const response = await fetch(url, {
     headers: { accept: "application/json" },
@@ -138,8 +140,47 @@ export function toCandidate(pool: DebotRankedToken, nowMs: number): TokenCandida
  * One discovery cycle over the activity ranking. Empty when nothing passes
  * the filters — a quiet market is normal, the chain falls through.
  */
+/**
+ * Merge two ranking windows, 5m (sustained attention) first, then 1m-only
+ * additions (fresh ignition). Pure function: dedupes by mint, keeps order.
+ */
+export function mergeRankings(
+  sustained: DebotRankedToken[],
+  ignition: DebotRankedToken[],
+): DebotRankedToken[] {
+  const seen = new Set<string>();
+  const merged: DebotRankedToken[] = [];
+  for (const row of [...sustained, ...ignition]) {
+    const address = String(row.address ?? "");
+    if (address.length <= 20 || seen.has(address)) continue;
+    seen.add(address);
+    merged.push(row);
+  }
+  return merged;
+}
+
+/** Current SOL/USD reference for reserve conversion (context use only). */
+export async function fetchSolPriceUsd(): Promise<number> {
+  const response = await fetch(`${BASE_URL}/api/market/price_state`, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(config.http.requestTimeoutMs),
+  });
+  if (!response.ok) throw new DebotError(response.status, `Debot HTTP ${response.status}`);
+  const json = (await response.json()) as {
+    code?: number;
+    data?: Record<string, { close?: string }>;
+  };
+  const price = toNumber(json.data?.SOLUSDT?.close, NaN);
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new DebotError(response.status, "Debot price_state missing SOLUSDT");
+  }
+  return price;
+}
+
 export async function discoverDebotTokens(): Promise<TokenCandidate[]> {
-  const rows = await fetchActivityRank(config.discovery.maxTokens * 2);
+  const sustained = await fetchActivityRank(config.discovery.maxTokens * 2, "5m");
+  const ignition = await fetchActivityRank(config.discovery.maxTokens, "1m");
+  const rows = mergeRankings(sustained, ignition);
   const nowMs = Date.now();
   const seen = new Set<string>();
   const candidates: TokenCandidate[] = [];
@@ -153,7 +194,8 @@ export async function discoverDebotTokens(): Promise<TokenCandidate[]> {
   }
 
   console.log(
-    `[discovery] debot ranked=${rows.length} qualified=${candidates.length}`,
+    `[discovery] debot ranked5m=${sustained.length} ranked1m=${ignition.length} ` +
+      `merged=${rows.length} qualified=${candidates.length}`,
   );
   return candidates;
 }

@@ -40,3 +40,7 @@ Birdeye token-list is plan-blocked (401) on the current key while OHLCV works, s
 ## Debot activity-rank discovery
 
 Debot community-signal ranking (keyless, 5m window, only duration=5m supported upstream) slots between Birdeye and DBotX: free, attention-led, with native USD market cap/liquidity/volume plus holder/swap counts and pair addresses. Verified live: ranked=20, qualified=10 with real liquidity ($8k–$464k) and seeded pairs. Empty results fall through to DBotX; universe only, never event timing.
+
+## Debot 1m ignition + price_state SOL
+
+Discovery merges the 5m sustained ranking with the 1m ignition ranking (5m order kept, 1m-only rows appended, mint-deduped). Verified live: ranked5m=20 ranked1m=10 merged=20 qualified=10. SOL/USD for DBotX reserve conversion now comes from Debot `price_state` ($111.48 live) with DexScreener as fallback. Heatmap (71 tracked tokens with per-call first/max price gain) deferred as future call-outcome validation input; `all_gas` declined (execution-only, research pipeline has no trading).

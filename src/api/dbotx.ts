@@ -13,6 +13,7 @@
 import { config } from "../config";
 import type { TokenCandidate } from "../types";
 import { sleep, toNumber } from "../utils";
+import { fetchSolPriceUsd } from "./debot";
 
 const BASE_URL = "https://api-data-v1.dbotx.com";
 const SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -106,13 +107,24 @@ type SolPriceCache = { price: number; at: number };
 let solPriceCache: SolPriceCache | null = null;
 
 /**
- * SOL/USD for reserve conversion, via keyless DexScreener, cached 1h.
- * Context/filter use only — never event timing. NaN when unavailable, in
- * which case liquidity falls back to 0 and the reserve filter decides.
+ * SOL/USD for reserve conversion: Debot price_state first, keyless
+ * DexScreener as fallback, cached 1h. Context/filter use only — never event
+ * timing. NaN when unavailable, in which case liquidity falls back to 0 and
+ * the reserve filter decides.
  */
 export async function getSolPriceUsd(): Promise<number> {
   if (solPriceCache && Date.now() - solPriceCache.at < 3_600_000) {
     return solPriceCache.price;
+  }
+
+  try {
+    const price = await fetchSolPriceUsd();
+    solPriceCache = { price, at: Date.now() };
+    return price;
+  } catch (error) {
+    console.warn(
+      `[dbotx] Debot SOL price failed, trying DexScreener: ${error instanceof Error ? error.message.slice(0, 100) : String(error).slice(0, 100)}`,
+    );
   }
 
   try {

@@ -12,7 +12,7 @@ import { buildObservation } from "./research/observations";
 import { classifyWallet } from "./research/labels";
 import { evaluateWallets } from "./research/scoring";
 import { toCandidate } from "./api/dbotx";
-import { toCandidate as toDebotCandidate } from "./api/debot";
+import { toCandidate as toDebotCandidate, mergeRankings } from "./api/debot";
 import type { Candle, DetectedEvent, Trade, WalletEventStats } from "./types";
 
 const wallet = "WALLET";
@@ -313,3 +313,15 @@ const debotDust = toDebotCandidate(
 if (debotDust !== null) throw new Error("row without market cap must be filtered");
 
 console.log("debot selftest: PASS");
+
+// --- Ranking merge: 5m order kept, 1m-only rows appended, dupes dropped.
+const merged = mergeRankings(
+  [{ address: "MINTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }, { address: "MINTBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" }],
+  [{ address: "MINTBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" }, { address: "MINTCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC" }],
+);
+if (merged.length !== 3) throw new Error("merge must dedupe by mint");
+if (merged[0]?.address !== "MINTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") {
+  throw new Error("merge must keep 5m order first");
+}
+
+console.log("merge selftest: PASS");
