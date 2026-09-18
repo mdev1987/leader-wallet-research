@@ -99,9 +99,13 @@ get_tx_for_address.ts  # legacy one-shot Helius fetch for a single token window
 For a pump event, a **BUY before the event start** is aligned with the event.
 For a dump event, a **SELL before the event start** is aligned with the event.
 
-The report requires at least:
+Additionally, a wallet's event only counts when its trades there are
+directionally consistent (dominant side >= 80%). Pool and market-maker legs
+take both sides of every swap by construction, so they can never qualify —
+while genuine accumulators and distributors pass. The report requires at
+least:
 
-- 3 event observations
+- 3 consistent event observations
 - 2 unique tokens
 
 Leaders are ranked by **size-adjusted 60s return**: the directional forward
@@ -154,6 +158,13 @@ Jupiter-style routes that settle in wrapped SOL are still attributed. It
 still skips balance changes that do not form a clear opposite-direction
 buy/sell pair — validate extracted trades against an explorer on a sample
 before using the dataset for model training.
+
+Note on coverage: `getTransactionsForAddress` returns every transaction that
+*references* the mint, including bot-spam transactions that invoke no token
+program and move nothing (observed: 31k txs → 1k trades on one hot-token
+event). The parser correctly ignores those, so a low trade/tx ratio on a hot
+token is expected, not a bug. `bun run src/diagnose.ts --token <mint>
+--start <unix> --end <unix>` histograms skip reasons for any window.
 
 ## Replay (offline backtest)
 

@@ -133,5 +133,7 @@ export type WalletStats = {
   medianSizeAdjustedReturn60s: number | null;
   positiveDirectional60Rate: number | null;
   observations: number;
+  /** Events excluded as directionally mixed (pool/MM legs). */
+  mixedEventsFiltered: number;
   tokens: string[];
 };

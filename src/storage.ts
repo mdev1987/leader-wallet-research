@@ -87,6 +87,8 @@ export async function writeLeaderReport(
             "candle-to-candle USD closes; dump-sell 60s returns sign-flipped so + means price fell",
           volumeShare:
             "trade SOL / same-side event-window SOL volume; size-adjusted return = directional * (1 - share), primary sort key",
+          directionConsistency:
+            "a wallet's event counts only when its dominant side there is >= 80% (pool/MM legs are ~50/50 and never qualify)",
           minLeaderEvents: config.report.minLeaderEvents,
           minLeaderTokens: config.report.minLeaderTokens,
         },

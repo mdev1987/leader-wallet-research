@@ -51,6 +51,7 @@ export async function fetchTransactionsForAddress(
   address: string,
   startTime: number,
   endTime: number,
+  opts?: { maxTransactions?: number },
 ): Promise<RawTransaction[]> {
   const transactions: RawTransaction[] = [];
   let paginationToken: string | undefined;
@@ -76,8 +77,15 @@ export async function fetchTransactionsForAddress(
       data: RawTransaction[];
       paginationToken?: string;
     }>("getTransactionsForAddress", [address, options]);
-
     transactions.push(...(result.data ?? []));
+
+    if (
+      opts?.maxTransactions !== undefined &&
+      transactions.length >= opts.maxTransactions
+    ) {
+      return transactions.slice(0, opts.maxTransactions);
+    }
+
     paginationToken = result.paginationToken;
   } while (paginationToken);
 

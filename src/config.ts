@@ -46,6 +46,9 @@ export const config = {
   report: {
     minLeaderEvents: 3,
     minLeaderTokens: 2,
+    // A wallet's event counts only when its dominant side there reaches
+    // this fraction. Pool/MM legs (~50/50 by construction) never qualify.
+    minDirectionConsistency: 0.8,
   },
 
   eval: {
