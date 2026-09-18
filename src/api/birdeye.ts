@@ -37,6 +37,33 @@ export function isBirdeyeRateLimit(error: unknown): error is BirdeyeError {
   return error instanceof BirdeyeError;
 }
 
+/**
+ * Plan-tier or credential block (401/403, insufficient permissions). Unlike
+ * rate limits this never resolves by retrying: fail fast with one request,
+ * and let the caller decide whether other endpoints may still work.
+ */
+export class BirdeyeAuthError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "BirdeyeAuthError";
+    this.status = status;
+  }
+}
+
+export function isBirdeyeAuthError(error: unknown): error is BirdeyeAuthError {
+  return error instanceof BirdeyeAuthError;
+}
+
+function isAuthFailure(status: number, text: string): boolean {
+  return (
+    status === 401 ||
+    status === 403 ||
+    /insufficient permissions|unauthorized|forbidden|invalid api[- ]?key/i.test(text)
+  );
+}
+
 class RateLimiter {
   private nextAllowedAt = 0;
 
@@ -101,6 +128,9 @@ async function requestJson<T>(
 
       if (json.success === false) {
         const message = json.message ?? "Birdeye request failed";
+        if (isAuthFailure(response.status, message)) {
+          throw new BirdeyeAuthError(response.status, message);
+        }
         if (/rate limit|too many requests|compute units/i.test(message)) {
           if (isQuotaMessage(message)) {
             throw new BirdeyeError(
@@ -126,8 +156,15 @@ async function requestJson<T>(
 
       return json;
     }
-
     const body = await response.text().catch(() => "");
+
+    if (isAuthFailure(response.status, body)) {
+      throw new BirdeyeAuthError(
+        response.status,
+        `Birdeye HTTP ${response.status}: ${body.slice(0, 300) || response.statusText}`,
+      );
+    }
+
     const limited = response.status === 429 || /rate limit|too many requests/i.test(body);
 
     if (limited && attempt < config.birdeye.maxRetries) {

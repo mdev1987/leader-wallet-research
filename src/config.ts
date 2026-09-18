@@ -14,7 +14,7 @@ export const config = {
   },
 
   birdeye: {
-    minIntervalMs: 2_000,
+    minIntervalMs: 3_000,
     scanEveryMs: 20_000,
     maxRetries: 4,
     baseRetryMs: 2_000,

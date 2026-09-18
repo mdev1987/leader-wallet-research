@@ -11,7 +11,7 @@
  * event timestamps should come from the finer-grained Birdeye candles.
  */
 
-import { discoverTokens, fetchCandles, isBirdeyeRateLimit } from "./api/birdeye";
+import { discoverTokens, fetchCandles, isBirdeyeAuthError, isBirdeyeRateLimit } from "./api/birdeye";
 import { fetchTransactionsForAddress } from "./api/helius";
 import { fetchTokenPairs } from "./api/dexscreener";
 import { config } from "./config";
@@ -79,6 +79,27 @@ async function main(): Promise<void> {
   for (const token of await loadCandidates(candidatesPath)) {
     active.set(token.address, { token, lastSeen: Date.now() });
   }
+
+  // Static fallback universe for keys whose plan tier blocks token-list
+  // discovery. Comma-separated mints; minimal metadata, refreshed by real
+  // discovery whenever the plan allows it.
+  for (const mint of (process.env.WATCHLIST_MINTS ?? "").split(",")) {
+    const address = mint.trim();
+    if (address.length <= 20 || active.has(address)) continue;
+    if (active.size >= config.discovery.maxTokens) break;
+    active.set(address, {
+      token: {
+        address,
+        symbol: address.slice(0, 8),
+        name: address.slice(0, 8),
+        liquidityUsd: 0,
+        volume1hUsd: 0,
+        trade1hCount: 0,
+      },
+      lastSeen: Date.now(),
+    });
+  }
+  if (active.size > 0) console.log(`watchlist: active=${active.size}`);
 
   const lastEvent = lastEventByToken(parsedEvents);
   const observedEventIds = new Set(observations.map((observation) => observation.eventId));
@@ -283,7 +304,16 @@ async function main(): Promise<void> {
           discoveryAt = nowMs;
           console.log(`[discovery] active=${active.size}`);
         } catch (error) {
-          if (isBirdeyeRateLimit(error)) {
+          if (isBirdeyeAuthError(error)) {
+            // Plan-tier block on discovery (e.g. token-list needs a higher
+            // tier). Fail fast, retry next discovery interval, and crucially
+            // do NOT gate candle scans: OHLCV may still work on this key.
+            discoveryAt = nowMs;
+            console.warn(
+              `[discovery] auth blocked (HTTP ${error.status}, plan tier?): ` +
+                `${error.message.slice(0, 150)} — frozen universe kept`,
+            );
+          } else if (isBirdeyeRateLimit(error)) {
             const cooldown = error.quotaExhausted
               ? config.birdeye.quotaCooldownMs
               : error.retryAfterMs || config.birdeye.rateLimitCooldownMs;
