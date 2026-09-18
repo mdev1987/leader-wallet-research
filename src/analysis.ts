@@ -258,16 +258,32 @@ export function buildObservation(
 
   const forward: Record<string, number | null> = {};
 
+  // Forward returns are candle-to-candle in the candle denomination (USD).
+  // Never mix trade.priceSol (SOL/token) with candle closes — that unit
+  // mismatch produced garbage ~+10000% returns in earlier runs.
+  const base = candleAtOrBefore(candles, trade.timestamp);
+
   for (const offset of config.analysis.forwardOffsetsSec) {
     const future = candleAtOrAfter(
       candles,
       trade.timestamp + offset,
     );
 
-    forward[String(offset)] = future
-      ? pctChange(trade.priceSol, future.close)
-      : null;
+    forward[String(offset)] =
+      base && future ? pctChange(base.close, future.close) : null;
   }
+
+  const raw60 = forward["60"] ?? null;
+
+  // Directional: a good pump-buy rides the price UP, a good dump-sell
+  // rides it DOWN, so dump forwards are sign-flipped. Without the flip,
+  // successful dump-sells scored negative and never counted as hits.
+  const directionalReturn60s =
+    alignedWithEvent && raw60 !== null
+      ? event.type === "dump"
+        ? -raw60
+        : raw60
+      : null;
 
   return {
     eventId: event.id,
@@ -285,10 +301,8 @@ export function buildObservation(
     tokenAmount: trade.tokenAmount,
     tradePriceSol: trade.priceSol,
     forward,
-    directionalReturn60s:
-      alignedWithEvent && forward["60"] !== null
-        ? forward["60"]
-        : null,
+    forwardBasis: "candle",
+    directionalReturn60s,
     signature: trade.signature,
   };
 }
@@ -312,6 +326,9 @@ export class LeaderAccumulator {
   add(observation: WalletObservation): void {
     if (!observation.alignedWithEvent) return;
     if (observation.phase !== "pre_event") return;
+    // Drop legacy rows whose forwards mixed SOL trade prices with USD
+    // candle closes (forwardBasis missing or not "candle").
+    if (observation.forwardBasis !== "candle") return;
     if (observation.directionalReturn60s === null) return;
 
     const state = this.byWallet.get(observation.wallet) ?? {

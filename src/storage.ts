@@ -83,6 +83,8 @@ export async function writeLeaderReport(
           eventWindow: `-${config.analysis.preSec}s to +${config.analysis.postSec}s around event start`,
           pumpDumpMove: `${config.event.movePct}% over ${config.event.moveSec}s`,
           acceleration: `${config.event.accelerationPct}% over ${config.event.accelerationSec}s`,
+          forwardBasis:
+            "candle-to-candle USD closes; dump-sell 60s returns sign-flipped so + means price fell",
           minLeaderEvents: config.report.minLeaderEvents,
           minLeaderTokens: config.report.minLeaderTokens,
         },

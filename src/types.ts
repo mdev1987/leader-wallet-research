@@ -99,6 +99,12 @@ export type WalletObservation = {
   tokenAmount: number;
   tradePriceSol: number;
   forward: Record<string, number | null>;
+  /**
+   * How `forward` was computed. "candle" = candle-to-candle closes.
+   * Observations written before this field existed mixed SOL-denominated
+   * trade prices with USD candle closes and must be ignored by stats.
+   */
+  forwardBasis?: string;
   directionalReturn60s: number | null;
   signature: string;
 };
