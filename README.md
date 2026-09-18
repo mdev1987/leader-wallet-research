@@ -70,12 +70,13 @@ Progress is append-only and resumable: re-running picks up
 `birdeye.minIntervalMs` / `scanEveryMs` or lower `maxActiveTokens` in
 `src/config.ts`.
 
-Output files:
+Output files (`data/` is gitignored):
 
 ```text
-data/events.jsonl
-data/wallet_observations.jsonl
-data/leader_wallets.json
+data/events.jsonl                 # one line per detected pump/dump
+data/wallet_observations.jsonl    # one line per trade × event
+data/wallet_observations.pre-fix.jsonl  # backup of rows written before the forward-return fix
+data/leader_wallets.json          # promoted wallets + methodology block
 ```
 
 ## Project structure
@@ -104,6 +105,25 @@ The report requires at least:
 - 2 unique tokens
 
 This is deliberately a minimum sample filter, not a trading recommendation or a claim that the wallet causes price movement.
+
+## Forward returns
+
+For each trade, 5/15/30/60s forward returns are computed
+**candle-close to candle-close** (Birdeye USD), anchored at the candle
+at/before trade time. The 60s value becomes `directionalReturn60s`,
+sign-flipped for dump-sells so that a falling price after a pre-dump
+sell scores positive. Rows carry `forwardBasis: "candle"`; the
+accumulator ignores rows written before this convention existed
+(their forwards mixed SOL trade prices with USD closes).
+See `SUMMARY.md` (local-only, gitignored) for the fix history and
+collected results.
+
+## Research status
+
+- 2 dump events collected, 864 trade observations.
+- Leader list still empty: promotion needs a 3rd event on a 2nd token.
+- Birdeye budget is healthy (24k+ CUs remaining at last check); earlier
+  429s were per-second rate limiting, handled with backoff + cooldown.
 
 ## Main parameters
 
