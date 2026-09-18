@@ -1,0 +1,124 @@
+# Solana Pump-Window Leader Wallet Research
+
+This is a Bun/TypeScript research worker for discovering wallets that repeatedly trade **immediately before short pump/dump events**.
+
+It intentionally does **not** download full token histories. The pipeline is:
+
+```text
+Birdeye token discovery
+        ↓
+Birdeye 1s OHLCV
+        ↓
+local pump/dump detector
+        ↓
+Helius getTransactionsForAddress
+        ↓
+event-local wallet/trade extraction
+        ↓
+forward price response
+        ↓
+leader_wallets.json
+```
+
+## Setup
+
+```bash
+cp .env.example .env
+# fill in BIRDEYE_API_KEY and HELIUS_API_KEY
+bun install
+bun run src/main.ts
+```
+
+## Configuration
+
+| Variable | Required | Used by |
+|---|---|---|
+| `BIRDEYE_API_KEY` | yes | token discovery + 1s OHLCV (`src/api/birdeye.ts`) |
+| `HELIUS_API_KEY` | yes | event-window transactions (`src/api/helius.ts`) |
+
+`.env` is gitignored and must never be committed. `.env.example`
+documents the full schema (including placeholders for optional/planned
+integrations such as paper trading, Telegram alerts, and enrichment
+services); only the two keys above are read by the current worker.
+
+## Timed run
+
+Birdeye's free/Starter plans enforce tight compute-unit limits, so the
+bot is configured to back off instead of crash-looping:
+
+- `src/api/birdeye.ts` retries 429s with exponential backoff
+  (respects `Retry-After`) and throws `BirdeyeRateLimitError` when spent.
+- `src/main.ts` isolates failures per token, skips Birdeye calls during a
+  90s cooldown, keeps pending events for retry, and exits cleanly on
+  SIGINT/SIGTERM.
+- `src/config.ts` defaults are softened for Starter plans:
+  discovery every 5 min, max 5 tokens, 1 req / 2s, scan every 30s,
+  3-min candle lookback.
+
+Run it timed later with:
+
+```bash
+timeout 900 bun run src/main.ts 2>&1 | tee live_run.log
+```
+
+Expected while limited: `[ratelimit] Birdeye 429 ... retrying in ...` and
+`[ratelimit] ... backing off ...` lines, then normal
+`[discovery] / [event] / [analysis]` lines once quota recovers.
+Progress is append-only and resumable: re-running picks up
+`data/events.jsonl` + `data/wallet_observations.jsonl` and rewrites
+`data/leader_wallets.json`. If 429s persist, raise
+`birdeye.minIntervalMs` / `scanEveryMs` or lower `maxActiveTokens` in
+`src/config.ts`.
+
+Output files:
+
+```text
+data/events.jsonl
+data/wallet_observations.jsonl
+data/leader_wallets.json
+```
+
+## Project structure
+
+```text
+src/
+  main.ts        # long-running worker: discover → detect → analyze → report
+  config.ts      # all thresholds in one place (tune without touching logic)
+  analysis.ts    # pure logic: event detection, trade parsing, wallet scoring
+  api/
+    birdeye.ts   # token discovery + 1s OHLCV (retry + rate-limit backoff)
+    helius.ts    # event-window getTransactionsForAddress client
+  storage.ts     # append-only JSONL + leader report
+  types.ts / utils.ts
+get_tx_for_address.ts  # legacy one-shot Helius fetch for a single token window
+```
+
+## What counts as a leader?
+
+For a pump event, a **BUY before the event start** is aligned with the event.
+For a dump event, a **SELL before the event start** is aligned with the event.
+
+The report requires at least:
+
+- 3 event observations
+- 2 unique tokens
+
+This is deliberately a minimum sample filter, not a trading recommendation or a claim that the wallet causes price movement.
+
+## Main parameters
+
+Edit `src/config.ts` to change:
+
+```text
+movePct          12% over 60s
+accelerationPct   3% over 15s
+analysisPreSec   180s before event start
+analysisPostSec   30s after event end
+forward offsets  5/15/30/60s
+```
+
+Keep these parameters explicit during research so they can later be optimized on a separate training/validation split.
+
+## Parser limitation
+
+The current parser infers buy/sell from target-token balance changes plus native SOL balance changes. It can miss routes whose settlement is entirely represented through WSOL or otherwise does not produce the expected native-SOL delta. Validate the extracted trades against an explorer on a sample before using the dataset for model training.

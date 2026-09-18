@@ -1,0 +1,12 @@
+{
+  "name": "leader_wallet_research",
+  "module": "index.ts",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  },
+  "private": true,
+  "type": "module"
+}

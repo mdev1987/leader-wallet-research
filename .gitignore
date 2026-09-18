@@ -1,0 +1,22 @@
+# Secrets — never commit live keys. .env.example stays tracked as the template.
+.env*
+!.env.example
+
+# Runtime research output (append-only JSONL + reports, recreated on each run)
+data/
+*.csv
+*.log
+trades.json
+
+# Local research notes / chat exports (may contain pasted snippets)
+Review-JavaScript-Timestamps.md
+doc/
+
+# Editor / OS noise
+.vscode/
+.DS_Store
+
+# Dependencies and build output
+node_modules/
+dist/
+build/
