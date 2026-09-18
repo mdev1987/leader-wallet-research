@@ -83,7 +83,7 @@ function getFeePayer(transaction: RawTransaction): {
   wallet: string;
   index: number;
 } | null {
-  const accountKeys: any = transaction.transaction.message.accountKeys;
+  const accountKeys = transaction.transaction.message.accountKeys;
 
   if (!accountKeys?.length) {
     return null;
@@ -91,11 +91,25 @@ function getFeePayer(transaction: RawTransaction): {
 
   // Prefer the first explicitly marked signer.
   const signerIndex = accountKeys.findIndex(
-    (key) => typeof key !== "string" && key.signer === true,
+    (
+      key:
+        | string
+        | {
+            pubkey: string;
+            signer?: boolean;
+            writable?: boolean;
+          },
+    ) => typeof key !== "string" && key.signer === true,
   );
 
   const index = signerIndex >= 0 ? signerIndex : 0;
-  const wallet = getPubkey(accountKeys[index]);
+  const key = accountKeys[index];
+
+  if (!key) {
+    return null;
+  }
+
+  const wallet = getPubkey(key);
 
   if (!wallet) {
     return null;

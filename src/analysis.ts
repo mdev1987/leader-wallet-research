@@ -68,6 +68,8 @@ export function detectLatestEvent(
   }
 
   const end = candles[candles.length - 1];
+  if (!end) return null;
+
   const moveStart = candleAtOrBefore(
     candles,
     end.unixTime - config.event.moveSec,

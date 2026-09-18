@@ -19,9 +19,15 @@ export function median(values: number[]): number | null {
   if (sorted.length === 0) return null;
 
   const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1
-    ? sorted[middle]
-    : (sorted[middle - 1] + sorted[middle]) / 2;
+
+  if (sorted.length % 2 === 1) {
+    return sorted[middle] ?? null;
+  }
+
+  const lower = sorted[middle - 1];
+  const upper = sorted[middle];
+  if (lower === undefined || upper === undefined) return null;
+  return (lower + upper) / 2;
 }
 
 export function pubkeyOf(
