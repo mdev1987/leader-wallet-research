@@ -1,0 +1,41 @@
+version = 1
+
+# Solana pump-window leader-wallet research worker (Bun/TypeScript).
+# Pipeline: Birdeye token discovery -> 1s OHLCV -> local pump/dump detector
+#   -> Helius getTransactionsForAddress (event window only) -> trade parsing
+#   -> forward returns -> data/leader_wallets.json
+# See README.md for methodology. Keys come from .env (gitignored, never commit).
+# Apply with: oxmgr apply ./oxfile.toml   (from this directory)
+# Logs with:  oxmgr logs leader-wallet -f
+
+[[apps]]
+name = "leader-wallet"
+# Bun loads .env automatically (src/config.ts reads Bun.env). Absolute bun
+# path so the daemon does not depend on interactive-shell PATH.
+command = "/home/mdev/.bun/bin/bun run src/main.ts"
+cwd = "/home/mdev/Programming/leader-wallet-research"
+restart_policy = "always"
+max_restarts = 100
+# Stop after 5 crash-restarts inside 5 minutes: a persistent config error
+# (e.g. missing .env keys, exit code != 0) must error-state, not hot-loop.
+# 0 would disable this protection entirely.
+crash_restart_limit = 5
+restart_delay_secs = 10
+stop_signal = "SIGTERM"
+stop_timeout_secs = 20
+# The worker logs every scan cycle (~30s) to stdout, which oxmgr captures to
+# <name>.log (unified_logs below merges stderr into the same file). A log
+# older than 6 minutes means the loop is stuck or wedged on network I/O ->
+# restart. Missing file = fresh boot, pass.
+health_cmd = "/bin/sh -c 'test ! -f /home/mdev/.local/share/oxmgr/logs/leader-wallet.log || test -n \"$(/usr/bin/find /home/mdev/.local/share/oxmgr/logs/leader-wallet.log -mmin -6 2>/dev/null)\"'"
+health_interval_secs = 60
+health_timeout_secs = 5
+health_max_failures = 3
+# Deps must resolve before a reload cuts over; a failed sync aborts the
+# reload and the old process keeps running.
+pre_reload_cmd = "/bin/sh -c 'cd /home/mdev/Programming/leader-wallet-research && /home/mdev/.bun/bin/bun install --frozen-lockfile'"
+unified_logs = true
+
+[apps.env]
+PATH = "/home/mdev/.bun/bin:/home/mdev/.cargo/bin:/usr/local/bin:/home/mdev/.local/bin:/usr/bin:/bin"
+HOME = "/home/mdev"
