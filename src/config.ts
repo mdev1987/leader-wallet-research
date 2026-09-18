@@ -127,6 +127,13 @@ export const config = {
     dbotxKey: process.env.DBOTX_API_KEY,
   },
 
+  helius: {
+    // Per-event transaction cap. Full payloads are ~10-15KB each; uncapped
+    // mega-event windows OOM small hosts mid-fetch (and the retry burns RPC
+    // budget for nothing). Earliest-first sample when capped.
+    maxTransactionsPerEvent: 8_000,
+  },
+
   http: {
     // No fetch in this codebase may hang forever: a tarpitted response
     // stalls the worker loop silently (no log, no restart). Timeouts turn

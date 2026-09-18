@@ -226,6 +226,7 @@ async function main(): Promise<void> {
       event.token.address,
       event.accelerationStart - config.analysis.preSec,
       event.confirmedAt + config.analysis.postSec,
+      { maxTransactions: config.helius.maxTransactionsPerEvent },
     );
 
     const trades = transactions.flatMap((tx) => parseTrades(tx, event.token.address));
@@ -263,7 +264,9 @@ async function main(): Promise<void> {
 
     console.log(
       `[analysis] ${label(event.token)} txs=${transactions.length} ` +
-        `trades=${trades.length} observations=${count}`,
+        `trades=${trades.length} observations=${count} ` +
+        `totalObs=${observations.length} ` +
+        `rss=${Math.round(process.memoryUsage().rss / 1048576)}MB`,
     );
     await refreshReports();
     return true;

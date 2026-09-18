@@ -91,6 +91,12 @@ export async function fetchTransactionsForAddress(
       opts?.maxTransactions !== undefined &&
       transactions.length >= opts.maxTransactions
     ) {
+      // Bounded fetch: mega-events can return tens of thousands of full
+      // transaction payloads, which OOM-kills small hosts. The window sample
+      // stays earliest-first (ascending pagination), bias documented by caller.
+      console.warn(
+        `[helius] capped at ${opts.maxTransactions} transactions (window truncated)`,
+      );
       return transactions.slice(0, opts.maxTransactions);
     }
 
