@@ -130,8 +130,9 @@ export const config = {
   helius: {
     // Per-event transaction cap. Full payloads are ~10-15KB each; uncapped
     // mega-event windows OOM small hosts mid-fetch (and the retry burns RPC
-    // budget for nothing). Earliest-first sample when capped.
-    maxTransactionsPerEvent: 8_000,
+    // budget for nothing). Earliest-first sample when capped. Kept low
+    // because this worker shares a 2GB box: 4000 x 15KB ~= 60MB spikes.
+    maxTransactionsPerEvent: 4_000,
   },
 
   http: {
